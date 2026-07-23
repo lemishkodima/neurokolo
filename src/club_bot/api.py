@@ -126,7 +126,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     unmatched_payment_count = Gauge(
         "neurokolo_unmatched_approved_payments",
-        "Approved provider payments without a linked subscription",
+        "Approved production payments without a linked subscription",
+        registry=metrics_registry,
+    )
+    unmatched_test_payment_count = Gauge(
+        "neurokolo_unmatched_test_approved_payments",
+        "Approved test payments without a linked subscription",
         registry=metrics_registry,
     )
     avatar_cache: tuple[float, bytes, str] | None = None
@@ -152,7 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.7.0-rc1", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.7.0-rc2", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -210,11 +215,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     select(func.count(Payment.id)).where(
                         Payment.status == PaymentStatus.APPROVED,
                         Payment.subscription_id.is_(None),
+                        ~Payment.order_reference.startswith("TEST-"),
+                    )
+                )
+                test_count = await session.scalar(
+                    select(func.count(Payment.id)).where(
+                        Payment.status == PaymentStatus.APPROVED,
+                        Payment.subscription_id.is_(None),
+                        Payment.order_reference.startswith("TEST-"),
                     )
                 )
             unmatched_payment_count.set(int(count or 0))
+            unmatched_test_payment_count.set(int(test_count or 0))
         except Exception:
             unmatched_payment_count.set(-1)
+            unmatched_test_payment_count.set(-1)
         return Response(
             content=generate_latest(metrics_registry),
             media_type=CONTENT_TYPE_LATEST,

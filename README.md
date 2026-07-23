@@ -285,7 +285,8 @@ Telegram membership is reconciled from that state by the worker.
 - The backup service writes a custom PostgreSQL archive and restores it into a temporary database
   before considering each backup successful.
 - Prometheus is bound to localhost port 9090 and alerts on API downtime, elevated 5xx responses,
-  and unmatched approved payments.
+  and unmatched approved production payments. Unmatched `TEST-*` payments remain visible through
+  a separate audit metric without raising a production-critical payment alert.
 - Put the API behind HTTPS and restrict the internal checkout endpoint to the website backend.
 - Use long random values for both webhook and internal API secrets.
 - Set `PAYMENT_GRACE_PERIOD_HOURS=0` for strict removal at the exact paid-through time. A 24-hour

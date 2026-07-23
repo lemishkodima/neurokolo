@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from club_bot.api import create_app
 from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
-from club_bot.models import Base, LandingTemplate
+from club_bot.domain.enums import PaymentStatus
+from club_bot.models import Base, LandingTemplate, Payment
 from club_bot.schemas import CheckoutResponse
 from club_bot.services.checkout_links import create_personal_checkout_token
 
@@ -65,12 +66,36 @@ def test_valid_production_settings_are_accepted() -> None:
 async def test_health_readiness_and_metrics_endpoints() -> None:
     settings = Settings(**settings_values())
     engine = create_engine(settings.database_url)
+    session_factory = create_session_factory(engine)
     app = create_app(settings)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    async with session_factory() as session, session.begin():
+        session.add_all(
+            [
+                Payment(
+                    provider_event_id="production-unmatched",
+                    order_reference="CLUB-unmatched",
+                    amount=990,
+                    currency="UAH",
+                    status=PaymentStatus.APPROVED,
+                    paid_at=datetime.now(UTC),
+                    provider_payload={},
+                ),
+                Payment(
+                    provider_event_id="test-unmatched",
+                    order_reference="TEST-unmatched",
+                    amount=990,
+                    currency="UAH",
+                    status=PaymentStatus.APPROVED,
+                    paid_at=datetime.now(UTC),
+                    provider_payload={},
+                ),
+            ]
+        )
     app.state.container = SimpleNamespace(
         engine=engine,
-        session_factory=create_session_factory(engine),
+        session_factory=session_factory,
     )
     transport = httpx.ASGITransport(app=app)
     try:
@@ -82,6 +107,8 @@ async def test_health_readiness_and_metrics_endpoints() -> None:
         assert ready.status_code == 200
         assert metrics.status_code == 200
         assert "neurokolo_http_requests_total" in metrics.text
+        assert "neurokolo_unmatched_approved_payments 1.0" in metrics.text
+        assert "neurokolo_unmatched_test_approved_payments 1.0" in metrics.text
     finally:
         await engine.dispose()
 
