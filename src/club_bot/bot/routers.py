@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import logging
+from html import escape
+
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command, CommandStart
+from aiogram.filters.command import CommandObject
+from aiogram.types import CallbackQuery, Message
+
+from club_bot.bot.keyboards import (
+    cancel_confirmation,
+    main_menu,
+    resource_links,
+    website_button,
+)
+from club_bot.config import Settings
+from club_bot.integrations.wayforpay import WayForPayError
+from club_bot.services.access import AccessDeniedError, AccessService
+from club_bot.services.admin import SettingsService
+from club_bot.services.subscription_notifications import SubscriptionNotificationService
+from club_bot.services.subscriptions import (
+    CheckoutExpiredError,
+    CheckoutNotFoundError,
+    SubscriptionNotFoundError,
+    SubscriptionService,
+)
+from club_bot.services.telegram_content import copy_telegram_content
+from club_bot.services.users import UserService
+
+router = Router(name="club")
+logger = logging.getLogger(__name__)
+
+
+WELCOME = (
+    "💎 <b>Ласкаво просимо до клубу!</b>\n\n"
+    "Тут зібрані уроки, практичні матеріали, тематичні гілки та спільнота. "
+    "Керуйте підпискою й доступом через меню нижче."
+)
+
+
+@router.message(CommandStart())
+async def start(
+    message: Message,
+    command: CommandObject,
+    user_service: UserService,
+    subscription_service: SubscriptionService,
+    settings_service: SettingsService,
+    subscription_notification_service: SubscriptionNotificationService,
+) -> None:
+    if message.from_user is None:
+        return
+    argument = command.args or ""
+    referral_code = argument.removeprefix("ref_") if argument.startswith("ref_") else None
+    await user_service.upsert_telegram_user(message.from_user, referral_code=referral_code)
+    labels = await settings_service.labels()
+
+    if argument.startswith("claim_"):
+        token = argument.removeprefix("claim_")
+        try:
+            result = await subscription_service.claim_checkout(token, message.from_user.id)
+        except (CheckoutNotFoundError, CheckoutExpiredError):
+            await message.answer(
+                "Посилання на оплату недійсне або вже прострочене. "
+                "Спробуйте оформити підписку ще раз.",
+                reply_markup=main_menu(labels),
+            )
+            return
+        if result.paid:
+            await message.answer(
+                "Особистий кабінет активовано.",
+                reply_markup=main_menu(labels),
+            )
+            await subscription_notification_service.send_activated(message.from_user.id)
+        else:
+            await message.answer(
+                "Акаунт прив’язано. Очікую підтвердження оплати від WayForPay.",
+                reply_markup=main_menu(labels),
+            )
+        return
+
+    await message.answer(WELCOME, reply_markup=main_menu(labels))
+
+
+@router.message(Command("about"))
+async def about(message: Message, settings_service: SettingsService, bot: Bot) -> None:
+    if not await _send_configured_content(message, "about", settings_service, bot):
+        await message.answer(await settings_service.get("club_about_text"))
+
+
+@router.message(F.text == "Доєднатися ✅")
+async def join(
+    message: Message,
+    settings: Settings,
+    settings_service: SettingsService,
+    bot: Bot,
+) -> None:
+    await _send_configured_content(message, "join", settings_service, bot)
+    await message.answer(
+        "Оформіть підписку на клуб на сайті. Після оплати сайт поверне вас у бот.",
+        reply_markup=website_button(settings.membership_site_url),
+    )
+
+
+@router.message(Command("subscription"))
+async def subscription_status(
+    message: Message,
+    subscription_service: SubscriptionService,
+    settings_service: SettingsService,
+    bot: Bot,
+) -> None:
+    if message.from_user is None:
+        return
+    await _send_configured_content(message, "subscription", settings_service, bot)
+    subscription = await subscription_service.current_for_telegram_user(message.from_user.id)
+    if subscription is None:
+        await message.answer("Активної підписки поки немає.")
+        return
+    paid_until = (
+        subscription.current_period_end.strftime("%d.%m.%Y %H:%M")
+        if subscription.current_period_end
+        else "—"
+    )
+    renewal = "вимкнено" if subscription.cancel_at_period_end else "увімкнено"
+    await message.answer(
+        f"<b>Статус підписки:</b> {escape(subscription.status)}\n"
+        f"<b>Доступ до:</b> {paid_until}\n"
+        f"<b>Автопродовження:</b> {renewal}"
+    )
+
+
+@router.message(Command("materials"))
+async def materials(
+    message: Message,
+    access_service: AccessService,
+    settings_service: SettingsService,
+    bot: Bot,
+) -> None:
+    if message.from_user is None:
+        return
+    await _send_configured_content(message, "materials", settings_service, bot)
+    try:
+        invites = await access_service.create_invites(message.from_user.id)
+    except AccessDeniedError:
+        await message.answer("Матеріали доступні лише з активною підпискою.")
+        return
+    if not invites:
+        await message.answer("Для вашого тарифу матеріали ще не додані.")
+        return
+    await message.answer(
+        "Ваші ресурси. Посилання персональні та мають обмежений строк дії:",
+        reply_markup=resource_links([(item.name, item.url) for item in invites]),
+    )
+
+
+@router.message(F.text == "Скасувати підписку ❌")
+async def ask_cancel(message: Message, subscription_service: SubscriptionService) -> None:
+    if message.from_user is None:
+        return
+    subscription = await subscription_service.current_for_telegram_user(message.from_user.id)
+    if subscription is None:
+        await message.answer("Активної підписки немає.")
+        return
+    if subscription.cancel_at_period_end:
+        await message.answer("Автопродовження вже вимкнене. Доступ збережено до кінця періоду.")
+        return
+    await message.answer(
+        "Вимкнути наступне автоматичне списання? Доступ залишиться до кінця оплаченого періоду.",
+        reply_markup=cancel_confirmation(),
+    )
+
+
+@router.callback_query(F.data == "subscription:cancel")
+async def confirm_cancel(
+    callback: CallbackQuery, subscription_service: SubscriptionService
+) -> None:
+    try:
+        subscription = await subscription_service.cancel_for_telegram_user(callback.from_user.id)
+    except SubscriptionNotFoundError:
+        await callback.answer("Активної підписки немає", show_alert=True)
+        return
+    except WayForPayError:
+        await callback.answer(
+            "Не вдалося зв’язатися з оплатою. Спробуйте пізніше.", show_alert=True
+        )
+        return
+    paid_until = (
+        subscription.current_period_end.strftime("%d.%m.%Y %H:%M")
+        if subscription.current_period_end
+        else "кінця поточного періоду"
+    )
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Підписку скасовано. Наступного списання не буде, доступ діє до {paid_until}."
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subscription:keep")
+async def keep_subscription(callback: CallbackQuery) -> None:
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Підписка залишається активною ✅")
+    await callback.answer()
+
+
+@router.message(Command("support"))
+async def support(
+    message: Message,
+    settings: Settings,
+    settings_service: SettingsService,
+    bot: Bot,
+) -> None:
+    await _send_configured_content(message, "support", settings_service, bot)
+    await message.answer(f"Підтримка: @{escape(settings.support_username)}")
+
+
+@router.message(Command("help"))
+async def help_command(message: Message, settings_service: SettingsService) -> None:
+    labels = await settings_service.labels()
+    await message.answer(
+        "Використовуйте меню для керування підпискою, доступу до матеріалів і зв’язку "
+        "з підтримкою.",
+        reply_markup=main_menu(labels),
+    )
+
+
+@router.message(F.text)
+async def dynamic_menu_action(
+    message: Message,
+    settings: Settings,
+    settings_service: SettingsService,
+    subscription_service: SubscriptionService,
+    access_service: AccessService,
+    bot: Bot,
+) -> None:
+    labels = await settings_service.labels()
+    actions = {
+        labels.about: "about",
+        labels.join: "join",
+        labels.subscription: "subscription",
+        labels.materials: "materials",
+        labels.support: "support",
+    }
+    match actions.get(message.text or ""):
+        case "about":
+            await about(message, settings_service, bot)
+        case "join":
+            await join(message, settings, settings_service, bot)
+        case "subscription":
+            await subscription_status(message, subscription_service, settings_service, bot)
+        case "materials":
+            await materials(message, access_service, settings_service, bot)
+        case "support":
+            await support(message, settings, settings_service, bot)
+
+
+async def _send_configured_content(
+    message: Message,
+    action: str,
+    settings_service: SettingsService,
+    bot: Bot,
+) -> bool:
+    content = await settings_service.menu_content(action)
+    if content is None:
+        return False
+    try:
+        await copy_telegram_content(bot, destination_chat_id=message.chat.id, content=content)
+    except TelegramAPIError:
+        logger.exception("Could not copy configured menu content for %s", action)
+        return False
+    return True

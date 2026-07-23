@@ -1,0 +1,714 @@
+from __future__ import annotations
+
+import uuid
+from decimal import Decimal, InvalidOperation
+from html import escape
+from urllib.parse import urlparse
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+
+from club_bot.bot.admin_keyboards import (
+    admin_menu,
+    admins_keyboard,
+    back_to_admin,
+    broadcast_confirm_keyboard,
+    broadcast_menu,
+    broadcast_target_keyboard,
+    menu_content_keyboard,
+    plan_resources_keyboard,
+    plans_keyboard,
+    settings_keyboard,
+)
+from club_bot.bot.admin_states import (
+    AdminAddStates,
+    BroadcastCreateStates,
+    MenuContentStates,
+    PlanCreateStates,
+    SettingEditStates,
+)
+from club_bot.domain.enums import BroadcastTarget
+from club_bot.services.admin import AdminService, CatalogService, SettingsService
+from club_bot.services.broadcasts import BroadcastService
+from club_bot.services.stats import StatsService
+from club_bot.services.telegram_content import (
+    TelegramContent,
+    copy_telegram_content,
+    url_buttons_markup,
+)
+
+admin_router = Router(name="admin")
+
+
+async def _authorized(event: Message | CallbackQuery, admin_service: AdminService) -> bool:
+    if event.from_user is None:
+        return False
+    allowed = await admin_service.is_admin(event.from_user.id)
+    if not allowed:
+        if isinstance(event, CallbackQuery):
+            await event.answer("Недостатньо прав", show_alert=True)
+        else:
+            await event.answer("Команда недоступна.")
+    return allowed
+
+
+@admin_router.message(Command("admin"))
+async def open_admin(message: Message, admin_service: AdminService, state: FSMContext) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    await state.clear()
+    await message.answer("<b>Адмін-панель клубу</b>", reply_markup=admin_menu())
+
+
+@admin_router.callback_query(F.data == "adm:home")
+async def admin_home(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("<b>Адмін-панель клубу</b>", reply_markup=admin_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:plans")
+async def show_plans(
+    callback: CallbackQuery, admin_service: AdminService, catalog_service: CatalogService
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    plans = await catalog_service.list_plans()
+    text = "Тарифи визначають, до яких каналів і груп бот видає доступ."
+    if not plans:
+        text += "\n\nПоки немає жодного тарифу."
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=plans_keyboard(plans))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:plan_new")
+async def new_plan(callback: CallbackQuery, admin_service: AdminService, state: FSMContext) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.set_state(PlanCreateStates.name)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Введіть внутрішню назву тарифу:")
+    await callback.answer()
+
+
+@admin_router.message(PlanCreateStates.name)
+async def plan_name(message: Message, admin_service: AdminService, state: FSMContext) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    await state.update_data(plan_name=message.text.strip())
+    await state.set_state(PlanCreateStates.price)
+    await message.answer("Введіть щомісячну ціну в UAH, наприклад <code>990</code>:")
+
+
+@admin_router.message(PlanCreateStates.price)
+async def plan_price(
+    message: Message,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        price = Decimal(message.text.replace(",", ".")).quantize(Decimal("0.01"))
+        if price <= 0:
+            raise InvalidOperation
+    except InvalidOperation:
+        await message.answer("Некоректна ціна. Введіть додатне число, наприклад 990.")
+        return
+    data = await state.get_data()
+    plan = await catalog_service.create_plan(name=str(data["plan_name"]), price=price)
+    await state.clear()
+    await message.answer(
+        f"✅ Тариф «{escape(plan.name)}» створено. Тепер виберіть для нього ресурси.",
+        reply_markup=plans_keyboard(await catalog_service.list_plans()),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan:"))
+async def select_plan(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    await state.update_data(selected_plan_id=str(plan_id))
+    resources = await catalog_service.plan_resources(plan_id)
+    text = "Оберіть канали й групи, доступні за цим тарифом:"
+    if not resources:
+        text += "\n\nДодайте бота адміністратором до потрібного каналу або групи."
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=plan_resources_keyboard(resources))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:resource:"))
+async def toggle_plan_resource(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    data = await state.get_data()
+    if "selected_plan_id" not in data:
+        await callback.answer("Спочатку оберіть тариф", show_alert=True)
+        return
+    plan_id = uuid.UUID(str(data["selected_plan_id"]))
+    resource_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    selected = await catalog_service.toggle_plan_resource(plan_id, resource_id)
+    resources = await catalog_service.plan_resources(plan_id)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=plan_resources_keyboard(resources))
+    await callback.answer("Додано" if selected else "Прибрано")
+
+
+@admin_router.callback_query(F.data == "adm:resources")
+async def show_resources(
+    callback: CallbackQuery, admin_service: AdminService, catalog_service: CatalogService
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    resources = await catalog_service.list_resources()
+    lines = ["<b>Збережені Telegram-ресурси</b>"]
+    lines.extend(
+        f"\n{'✅' if item.is_active else '⏸'} {escape(item.name)}\n<code>{item.chat_id}</code>"
+        for item in resources
+    )
+    if not resources:
+        lines.append(
+            "\nДодайте бота адміністратором до каналу або групи — ресурс збережеться автоматично."
+        )
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("".join(lines), reply_markup=back_to_admin())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:settings")
+async def show_settings(callback: CallbackQuery, admin_service: AdminService) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Оберіть текст або кнопку для редагування:", reply_markup=settings_keyboard()
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:setting:"))
+async def edit_setting(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    key = callback.data.rsplit(":", 1)[1]
+    # Old admin-menu messages used this callback for the about text. Keep it
+    # compatible and route it to the full rich-content editor.
+    if key == "club_about_text":
+        await _begin_menu_content_edit(callback, state, "about")
+        await callback.answer()
+        return
+    await state.update_data(setting_key=key)
+    await state.set_state(SettingEditStates.value)
+    prompt = (
+        "Надішліть новий текст. Telegram-форматування буде збережене."
+        if key == "club_about_text"
+        else "Надішліть новий текст кнопки (до 64 символів)."
+    )
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(prompt)
+    await callback.answer()
+
+
+@admin_router.message(SettingEditStates.value)
+async def save_setting(
+    message: Message,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    key = str(data["setting_key"])
+    value = message.html_text if key == "club_about_text" else (message.text or "").strip()
+    if not value or (key != "club_about_text" and len(value) > 64):
+        await message.answer("Значення порожнє або задовге. Спробуйте ще раз.")
+        return
+    await settings_service.set(key, value)
+    await state.clear()
+    await message.answer(
+        "✅ Збережено. Новий текст застосовується одразу.", reply_markup=admin_menu()
+    )
+
+
+@admin_router.callback_query(F.data == "adm:menu_content")
+async def show_menu_content(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    configured = await _configured_menu_content(settings_service)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Оберіть кнопку, для якої потрібно налаштувати текст, медіа та URL-кнопки. "
+            "✅ означає, що контент уже налаштовано.",
+            reply_markup=menu_content_keyboard(configured),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:menu_content_edit:"))
+async def edit_menu_content(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    action = callback.data.rsplit(":", 1)[1]
+    await _begin_menu_content_edit(callback, state, action)
+    await callback.answer()
+
+
+@admin_router.message(MenuContentStates.content, Command("done"))
+async def menu_content_done(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    message_ids = list(set(data.get("menu_content_message_ids", [])))
+    if not message_ids:
+        await message.answer("Спочатку надішліть текст або медіа.")
+        return
+    if len(message_ids) > 100:
+        await message.answer("Можна зберегти не більше 100 повідомлень.")
+        return
+    await state.set_state(MenuContentStates.buttons)
+    await message.answer(
+        "Додайте URL-кнопки у форматі:\n"
+        "<code>Сайт | https://example.com</code>\n\n"
+        "Кожен рядок — окремий ряд кнопок, <code>;;</code> розділяє кнопки в одному рядку. "
+        "Якщо вони не потрібні — /skip."
+    )
+
+
+@admin_router.message(MenuContentStates.content)
+async def collect_menu_content(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    message_ids = list(data.get("menu_content_message_ids", []))
+    message_ids.append(message.message_id)
+    acknowledged_groups = set(data.get("menu_content_acknowledged_groups", []))
+    media_group_id = message.media_group_id
+    should_acknowledge = media_group_id is None or media_group_id not in acknowledged_groups
+    if media_group_id is not None:
+        acknowledged_groups.add(media_group_id)
+    await state.update_data(
+        menu_content_message_ids=message_ids,
+        menu_content_source_chat_id=message.chat.id,
+        menu_content_acknowledged_groups=sorted(acknowledged_groups),
+    )
+    if should_acknowledge:
+        await message.answer(
+            "✅ Контент отримано. Щоб зберегти його, введіть /done, а потім додайте "
+            "URL-кнопки або введіть /skip."
+        )
+
+
+@admin_router.message(MenuContentStates.buttons, Command("skip"))
+async def skip_menu_content_buttons(
+    message: Message,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    await _save_menu_content(message, settings_service, state, bot, [])
+
+
+@admin_router.message(MenuContentStates.buttons)
+async def save_menu_content_buttons(
+    message: Message,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        buttons = _parse_buttons(message.text)
+    except ValueError as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return
+    await _save_menu_content(message, settings_service, state, bot, buttons)
+
+
+@admin_router.callback_query(F.data.startswith("adm:menu_content_clear:"))
+async def clear_menu_content(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    action = callback.data.rsplit(":", 1)[1]
+    await settings_service.clear_menu_content(action)
+    configured = await _configured_menu_content(settings_service)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=menu_content_keyboard(configured))
+    await callback.answer("Контент видалено")
+
+
+@admin_router.callback_query(F.data == "adm:admins")
+async def show_admins(callback: CallbackQuery, admin_service: AdminService) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "🔒 — головний адміністратор, його не можна видалити.\n"
+            "Натисніть ❌ біля доданого адміністратора, щоб забрати доступ.",
+            reply_markup=admins_keyboard(await admin_service.list_admins()),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:admin_add")
+async def add_admin_start(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.set_state(AdminAddStates.telegram_id)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Надішліть числовий Telegram ID нового адміністратора:")
+    await callback.answer()
+
+
+@admin_router.message(AdminAddStates.telegram_id)
+async def add_admin_save(message: Message, admin_service: AdminService, state: FSMContext) -> None:
+    if (
+        not await _authorized(message, admin_service)
+        or not message.text
+        or message.from_user is None
+    ):
+        return
+    try:
+        telegram_id = int(message.text.strip())
+        if telegram_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("ID має бути додатним числом.")
+        return
+    await admin_service.add_admin(telegram_id, added_by=message.from_user.id)
+    await state.clear()
+    await message.answer(
+        f"✅ Адміністратора <code>{telegram_id}</code> додано.",
+        reply_markup=admins_keyboard(await admin_service.list_admins()),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:admin_remove:"))
+async def remove_admin(callback: CallbackQuery, admin_service: AdminService) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    telegram_id = int(callback.data.rsplit(":", 1)[1])
+    removed = await admin_service.remove_admin(telegram_id)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(
+            reply_markup=admins_keyboard(await admin_service.list_admins())
+        )
+    await callback.answer("Видалено" if removed else "Не можна видалити")
+
+
+@admin_router.callback_query(F.data == "adm:noop")
+async def noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:broadcasts")
+async def broadcasts(callback: CallbackQuery, admin_service: AdminService) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Керування розсилками:", reply_markup=broadcast_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:broadcast_new")
+async def broadcast_new(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.clear()
+    await state.set_state(BroadcastCreateStates.content)
+    await state.update_data(source_message_ids=[])
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Надішліть повідомлення або медіагрупу для розсилки. Форматування, caption і медіа "
+            "будуть збережені. Коли все надіслано — введіть /done."
+        )
+    await callback.answer()
+
+
+@admin_router.message(BroadcastCreateStates.content, Command("done"))
+async def broadcast_content_done(
+    message: Message, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    if not data.get("source_message_ids"):
+        await message.answer("Спочатку надішліть повідомлення або медіагрупу.")
+        return
+    if len(set(data["source_message_ids"])) > 100:
+        await message.answer("В одній розсилці може бути не більше 100 повідомлень.")
+        return
+    await state.set_state(BroadcastCreateStates.buttons)
+    await message.answer(
+        "За потреби надішліть кнопки у форматі:\n"
+        "<code>Сайт | https://example.com</code>\n\n"
+        "Кожен рядок — окремий ряд кнопок. Дві кнопки в одному рядку розділяйте <code>;;</code>. "
+        "Якщо кнопки не потрібні — /skip."
+    )
+
+
+@admin_router.message(BroadcastCreateStates.content)
+async def collect_broadcast_content(
+    message: Message, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    ids = list(data.get("source_message_ids", []))
+    ids.append(message.message_id)
+    await state.update_data(source_message_ids=ids, source_chat_id=message.chat.id)
+
+
+@admin_router.message(BroadcastCreateStates.buttons, Command("skip"))
+async def skip_broadcast_buttons(
+    message: Message, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    await state.update_data(buttons=[])
+    await state.set_state(BroadcastCreateStates.target)
+    await message.answer("Кому надіслати розсилку?", reply_markup=broadcast_target_keyboard())
+
+
+@admin_router.message(BroadcastCreateStates.buttons)
+async def save_broadcast_buttons(
+    message: Message, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        buttons = _parse_buttons(message.text)
+    except ValueError as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return
+    await state.update_data(buttons=buttons)
+    await state.set_state(BroadcastCreateStates.target)
+    await message.answer("Кому надіслати розсилку?", reply_markup=broadcast_target_keyboard())
+
+
+@admin_router.callback_query(BroadcastCreateStates.target, F.data.startswith("adm:target:"))
+async def choose_broadcast_target(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    target = BroadcastTarget(callback.data.rsplit(":", 1)[1])
+    await state.update_data(target=target.value)
+    data = await state.get_data()
+    copied = await bot.copy_messages(
+        chat_id=callback.from_user.id,
+        from_chat_id=int(data["source_chat_id"]),
+        message_ids=sorted(set(data["source_message_ids"])),
+    )
+    buttons = data.get("buttons", [])
+    if buttons and copied:
+        await bot.edit_message_reply_markup(
+            chat_id=callback.from_user.id,
+            message_id=copied[-1].message_id,
+            reply_markup=url_buttons_markup(buttons),
+        )
+    await state.set_state(BroadcastCreateStates.confirm)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Це попередній перегляд. Запустити розсилку?",
+            reply_markup=broadcast_confirm_keyboard(),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(BroadcastCreateStates.confirm, F.data == "adm:broadcast_send")
+async def send_broadcast(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    broadcast_service: BroadcastService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    data = await state.get_data()
+    broadcast = await broadcast_service.queue(
+        created_by_telegram_id=callback.from_user.id,
+        source_chat_id=int(data["source_chat_id"]),
+        source_message_ids=list(data["source_message_ids"]),
+        buttons=list(data.get("buttons", [])),
+        target=BroadcastTarget(str(data["target"])),
+    )
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"✅ Розсилку поставлено в чергу для {broadcast.total_recipients} користувачів.",
+            reply_markup=admin_menu(),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:broadcast_cancel")
+async def cancel_broadcast(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Розсилку скасовано.", reply_markup=admin_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:broadcast_recent")
+async def recent_broadcasts(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    broadcast_service: BroadcastService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    recent = await broadcast_service.recent()
+    lines = ["<b>Останні розсилки</b>"]
+    lines.extend(
+        f"\n{item.created_at:%d.%m %H:%M} · {item.status.value} · "
+        f"{item.sent_count}/{item.total_recipients}"
+        for item in recent
+    )
+    if not recent:
+        lines.append("\nРозсилок ще немає.")
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("".join(lines), reply_markup=broadcast_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:stats")
+async def stats(
+    callback: CallbackQuery, admin_service: AdminService, stats_service: StatsService
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    report = await stats_service.render_html()
+    if isinstance(callback.message, Message):
+        await callback.message.answer_document(
+            BufferedInputFile(report.encode(), filename="club-statistics.html"),
+            caption="📊 Статистика клубу",
+        )
+    await callback.answer()
+
+
+def _parse_buttons(text: str) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    for raw_row in text.splitlines():
+        if not raw_row.strip():
+            continue
+        row: list[dict[str, str]] = []
+        for raw_button in raw_row.split(";;"):
+            parts = [item.strip() for item in raw_button.split("|", maxsplit=1)]
+            if len(parts) != 2 or not all(parts):
+                raise ValueError("кожна кнопка повинна мати формат Назва | URL")
+            parsed = urlparse(parts[1])
+            if parsed.scheme not in {"http", "https", "tg"}:
+                raise ValueError("URL має починатися з https://, http:// або tg://")
+            row.append({"text": parts[0][:64], "url": parts[1]})
+        rows.append(row)
+    if not rows:
+        raise ValueError("не знайдено жодної кнопки")
+    return rows
+
+
+async def _save_menu_content(
+    message: Message,
+    settings_service: SettingsService,
+    state: FSMContext,
+    bot: Bot,
+    buttons: list[list[dict[str, str]]],
+) -> None:
+    data = await state.get_data()
+    content = TelegramContent(
+        source_chat_id=int(data["menu_content_source_chat_id"]),
+        source_message_ids=sorted(set(data["menu_content_message_ids"])),
+        buttons=buttons,
+    )
+    action = str(data["menu_content_action"])
+    await settings_service.set_menu_content(action, content)
+    await state.clear()
+    await copy_telegram_content(bot, destination_chat_id=message.chat.id, content=content)
+    configured = await _configured_menu_content(settings_service)
+    await message.answer(
+        "✅ Контент збережено. Вище — його попередній перегляд.",
+        reply_markup=menu_content_keyboard(configured),
+    )
+
+
+async def _begin_menu_content_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    action: str,
+) -> None:
+    await state.clear()
+    await state.set_state(MenuContentStates.content)
+    await state.update_data(
+        menu_content_action=action,
+        menu_content_message_ids=[],
+        menu_content_acknowledged_groups=[],
+    )
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Надішліть текст, фото, відео або медіагрупу. Telegram-форматування і підписи "
+            "будуть збережені.\n\n<b>Після надсилання обов’язково введіть /done.</b>"
+        )
+
+
+async def _configured_menu_content(settings_service: SettingsService) -> set[str]:
+    actions = {"about", "join", "subscription", "materials", "support"}
+    return {action for action in actions if await settings_service.menu_content(action) is not None}

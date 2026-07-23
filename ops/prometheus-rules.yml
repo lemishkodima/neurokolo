@@ -1,0 +1,39 @@
+groups:
+  - name: neurokolo
+    rules:
+      - alert: NeurokoloApiDown
+        expr: up{job="neurokolo-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Neurokolo API is unavailable
+
+      - alert: NeurokoloHighServerErrorRate
+        expr: |
+          (
+            sum(rate(neurokolo_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(neurokolo_http_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 5% of Neurokolo API requests return 5xx
+
+      - alert: NeurokoloUnmatchedApprovedPayment
+        expr: neurokolo_unmatched_approved_payments > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: An approved payment is not linked to a subscription
+
+      - alert: NeurokoloPaymentAuditUnavailable
+        expr: neurokolo_unmatched_approved_payments < 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Payment audit metrics cannot query PostgreSQL

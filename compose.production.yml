@@ -1,0 +1,207 @@
+name: neurokolo-production
+
+x-app-secrets: &app-secrets
+  - bot_token
+  - bot_webhook_secret
+  - database_url
+  - internal_api_key
+  - wayforpay_secret_key
+  - wayforpay_merchant_password
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-club}
+      POSTGRES_USER: ${POSTGRES_USER:-club}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    secrets: *app-secrets
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  api:
+    build:
+      context: .
+      target: runtime
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    secrets: *app-secrets
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    secrets: *app-secrets
+    command: ["club-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN in .env.production}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/log/caddy
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  backup:
+    image: postgres:17-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-club}
+      PGUSER: ${POSTGRES_USER:-club}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      VERIFY_RESTORE: "true"
+    secrets:
+      - postgres_password
+    volumes:
+      - ${BACKUP_HOST_PATH:-./backups}:/backups
+      - ./ops/backup-loop.sh:/ops/backup-loop.sh:ro
+      - ./ops/verify-backup.sh:/ops/verify-backup.sh:ro
+    command: ["/bin/sh", "/ops/backup-loop.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /backups/.last_success && test $$(find /backups/.last_success -mmin -1560 -print | wc -l) -eq 1",
+        ]
+      interval: 30m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  database_url:
+    file: ./secrets/database_url
+  bot_token:
+    file: ./secrets/bot_token
+  bot_webhook_secret:
+    file: ./secrets/bot_webhook_secret
+  internal_api_key:
+    file: ./secrets/internal_api_key
+  wayforpay_secret_key:
+    file: ./secrets/wayforpay_secret_key
+  wayforpay_merchant_password:
+    file: ./secrets/wayforpay_merchant_password
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  prometheus_data:
