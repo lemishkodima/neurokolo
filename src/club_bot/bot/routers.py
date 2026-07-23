@@ -168,7 +168,8 @@ async def materials(
         await message.answer("Для вашого тарифу матеріали ще не додані.")
         return
     await message.answer(
-        "Ваші ресурси. Посилання персональні та мають обмежений строк дії:",
+        "Ваші ресурси. Посилання персональні та мають обмежений строк дії. "
+        "Подайте заявку — бот автоматично перевірить ваш Telegram-акаунт:",
         reply_markup=resource_links([(item.name, item.url) for item in invites]),
     )
 

@@ -1,14 +1,35 @@
+import logging
 from html import escape
 
 from aiogram import Bot, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import ChatMemberUpdated
+from aiogram.types import ChatJoinRequest, ChatMemberUpdated
 
 from club_bot.domain.enums import ResourceType
+from club_bot.services.access import AccessService
 from club_bot.services.admin import AdminService, CatalogService
 
 system_router = Router(name="system")
+logger = logging.getLogger(__name__)
+
+
+@system_router.chat_join_request()
+async def review_join_request(
+    event: ChatJoinRequest,
+    access_service: AccessService,
+) -> None:
+    approved = await access_service.handle_join_request(
+        chat_id=event.chat.id,
+        telegram_id=event.from_user.id,
+        invite_link=event.invite_link.invite_link if event.invite_link is not None else None,
+    )
+    logger.info(
+        "Telegram join request %s for user %s in chat %s",
+        "approved" if approved else "declined",
+        event.from_user.id,
+        event.chat.id,
+    )
 
 
 @system_router.my_chat_member()

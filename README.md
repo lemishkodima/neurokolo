@@ -9,9 +9,12 @@ FastAPI, PostgreSQL and WayForPay recurring payments.
 - External WayForPay checkout-session API and signed payment callbacks.
 - Monthly recurring payment configuration.
 - Cancellation at period end through WayForPay `SUSPEND`.
-- Personal, expiring invite links for every channel or forum included in a plan.
-- Automatic post-payment confirmation with one-member invite buttons immediately after the
-  Telegram account and successful checkout are matched.
+- Personal, expiring join-request links for every channel or forum included in a plan.
+- Automatic approval only when the applicant Telegram ID owns the invite and still has
+  entitlement to that specific resource; foreign requests are declined and the leaked link is
+  revoked.
+- Automatic post-payment confirmation with identity-bound join-request buttons immediately after
+  the Telegram account and successful checkout are matched.
 - Automatic removal from all plan resources after expiration and an optional grace period.
 - Multiple plans and arbitrary plan-to-resource mappings.
 - Telegram admin panel for composing plans from channels/groups; the single-plan user flow stays
@@ -113,9 +116,9 @@ The panel supports:
 - adding and revoking additional administrator IDs.
 
 For Telegram access management, add the bot as an administrator to every private channel and
-supergroup. It needs permissions to create invite links and restrict members. If the bot was
-already present before this version was started, remove and re-add it once so Telegram emits the
-membership update used for automatic registration.
+supergroup. It needs permissions to create invite links, approve join requests, and restrict
+members. If the bot was already present before this version was started, remove and re-add it once
+so Telegram emits the membership update used for automatic registration.
 
 When the database has one active tariff, users are never asked to select it; the configured
 `DEFAULT_PLAN_CODE` is used. The tariff editor remains visible only to administrators.

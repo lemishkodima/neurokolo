@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from club_bot.models import (
     ResourceMembership,
     Subscription,
     TelegramResource,
+    User,
     plan_resources,
 )
 from club_bot.repositories import SubscriptionRepository, UserRepository
@@ -30,6 +32,12 @@ class AccessDeniedError(PermissionError):
 class ResourceInvite:
     name: str
     url: str
+
+
+@dataclass(frozen=True)
+class JoinRequestReview:
+    membership_id: uuid.UUID
+    allowed: bool
 
 
 class AccessService:
@@ -84,17 +92,23 @@ class AccessService:
             invites: list[ResourceInvite] = []
             expires_at = now + timedelta(seconds=self.invite_ttl_seconds)
             for resource in resources:
-                link = await self.bot.create_chat_invite_link(
-                    chat_id=resource.chat_id,
-                    name=f"user:{telegram_id}",
-                    expire_date=expires_at,
-                    member_limit=1,
-                )
                 membership = await session.scalar(
                     select(ResourceMembership).where(
                         ResourceMembership.user_id == user.id,
                         ResourceMembership.resource_id == resource.id,
                     )
+                )
+                if membership is not None and membership.invite_link:
+                    with suppress(TelegramBadRequest):
+                        await self.bot.revoke_chat_invite_link(
+                            chat_id=resource.chat_id,
+                            invite_link=membership.invite_link,
+                        )
+                link = await self.bot.create_chat_invite_link(
+                    chat_id=resource.chat_id,
+                    name=f"user:{telegram_id}",
+                    expire_date=expires_at,
+                    creates_join_request=True,
                 )
                 if membership is None:
                     membership = ResourceMembership(
@@ -105,9 +119,148 @@ class AccessService:
                 membership.status = MembershipStatus.INVITED
                 membership.invite_link = link.invite_link
                 membership.invite_expires_at = expires_at
+                membership.joined_at = None
                 membership.revoked_at = None
                 invites.append(ResourceInvite(name=resource.name, url=link.invite_link))
             return invites
+
+    async def handle_join_request(
+        self,
+        *,
+        chat_id: int,
+        telegram_id: int,
+        invite_link: str | None,
+    ) -> bool:
+        review = (
+            await self._review_join_request(
+                chat_id=chat_id,
+                telegram_id=telegram_id,
+                invite_link=invite_link,
+            )
+            if invite_link is not None
+            else None
+        )
+        if review is not None and review.allowed and invite_link is not None:
+            await self.bot.approve_chat_join_request(
+                chat_id=chat_id,
+                user_id=telegram_id,
+            )
+            with suppress(TelegramBadRequest):
+                await self.bot.revoke_chat_invite_link(
+                    chat_id=chat_id,
+                    invite_link=invite_link,
+                )
+            await self._mark_joined(review.membership_id, invite_link)
+            return True
+
+        with suppress(TelegramBadRequest):
+            await self.bot.decline_chat_join_request(
+                chat_id=chat_id,
+                user_id=telegram_id,
+            )
+        if review is not None and invite_link is not None:
+            with suppress(TelegramBadRequest):
+                await self.bot.revoke_chat_invite_link(
+                    chat_id=chat_id,
+                    invite_link=invite_link,
+                )
+            await self._clear_pending_invite(review.membership_id, invite_link)
+        return False
+
+    async def _review_join_request(
+        self,
+        *,
+        chat_id: int,
+        telegram_id: int,
+        invite_link: str,
+    ) -> JoinRequestReview | None:
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(
+                        ResourceMembership.id,
+                        ResourceMembership.user_id,
+                        ResourceMembership.resource_id,
+                        ResourceMembership.status,
+                        ResourceMembership.invite_expires_at,
+                        User.telegram_id,
+                    )
+                    .join(User, User.id == ResourceMembership.user_id)
+                    .join(
+                        TelegramResource,
+                        TelegramResource.id == ResourceMembership.resource_id,
+                    )
+                    .where(
+                        TelegramResource.chat_id == chat_id,
+                        TelegramResource.is_active.is_(True),
+                        ResourceMembership.invite_link == invite_link,
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+
+            now = utc_now()
+            identity_matches = int(row.telegram_id) == telegram_id
+            invite_is_current = (
+                row.status == MembershipStatus.INVITED
+                and row.invite_expires_at is not None
+                and as_utc(row.invite_expires_at) > now
+            )
+            entitlement = None
+            if identity_matches and invite_is_current:
+                entitlement_cutoff = now - timedelta(hours=self.grace_period_hours)
+                entitlement = await session.scalar(
+                    select(Subscription.id)
+                    .join(
+                        plan_resources,
+                        Subscription.plan_id == plan_resources.c.plan_id,
+                    )
+                    .where(
+                        Subscription.user_id == row.user_id,
+                        Subscription.status.in_(
+                            [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]
+                        ),
+                        Subscription.current_period_end > entitlement_cutoff,
+                        plan_resources.c.resource_id == row.resource_id,
+                    )
+                    .limit(1)
+                )
+            return JoinRequestReview(
+                membership_id=row.id,
+                allowed=identity_matches and invite_is_current and entitlement is not None,
+            )
+
+    async def _mark_joined(self, membership_id: uuid.UUID, invite_link: str) -> None:
+        async with self.session_factory() as session, session.begin():
+            membership = await session.get(
+                ResourceMembership,
+                membership_id,
+                with_for_update=True,
+            )
+            if membership is None or membership.invite_link != invite_link:
+                return
+            membership.status = MembershipStatus.ACTIVE
+            membership.joined_at = utc_now()
+            membership.invite_link = None
+            membership.invite_expires_at = None
+            membership.revoked_at = None
+
+    async def _clear_pending_invite(
+        self,
+        membership_id: uuid.UUID,
+        invite_link: str,
+    ) -> None:
+        async with self.session_factory() as session, session.begin():
+            membership = await session.get(
+                ResourceMembership,
+                membership_id,
+                with_for_update=True,
+            )
+            if membership is None or membership.invite_link != invite_link:
+                return
+            membership.invite_link = None
+            membership.invite_expires_at = None
 
     async def revoke_subscription_access(
         self,

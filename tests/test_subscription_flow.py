@@ -463,10 +463,17 @@ async def test_complete_subscription_lifecycle(
             self.banned_users: list[int] = []
 
         async def create_chat_invite_link(self, **kwargs: Any) -> FakeInvite:
-            assert kwargs["member_limit"] == 1
+            assert kwargs["creates_join_request"] is True
+            assert "member_limit" not in kwargs
             return FakeInvite()
 
         async def revoke_chat_invite_link(self, **kwargs: Any) -> None:
+            pass
+
+        async def approve_chat_join_request(self, **kwargs: Any) -> None:
+            pass
+
+        async def decline_chat_join_request(self, **kwargs: Any) -> None:
             pass
 
         async def ban_chat_member(self, *, chat_id: int, user_id: int) -> None:

@@ -46,7 +46,10 @@ class SubscriptionNotificationService:
             )
         text = await self.settings_service.get("payment_success_text")
         if invites:
-            text += "\n\nНатисніть кнопку нижче, щоб доєднатися. Посилання персональне."
+            text += (
+                "\n\nНатисніть кнопку нижче та подайте заявку. Бот автоматично "
+                "підтвердить лише ваш Telegram-акаунт; посилання персональне."
+            )
         else:
             text += "\n\nВідкрити доступ можна через кнопку «Матеріали»."
         try:
