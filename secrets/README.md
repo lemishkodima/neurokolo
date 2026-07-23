@@ -17,3 +17,12 @@ value and a trailing newline is optional:
 Generate new `postgres_password`, `bot_webhook_secret`, and `internal_api_key`
 values for production. Rotate provider secrets that may have previously been shared.
 Never copy the local `.env` file into Git or an image.
+
+The runtime image uses UID/GID `10001`. Docker Compose bind-mounts local secret
+files without changing their ownership, so make them readable by that group while
+keeping them private from other users:
+
+```bash
+chown root:10001 secrets/*
+chmod 640 secrets/*
+```
