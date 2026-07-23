@@ -7,14 +7,21 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from club_bot.services.access import AccessService
+from club_bot.services.admin import SettingsService
 
 logger = logging.getLogger(__name__)
 
 
 class SubscriptionNotificationService:
-    def __init__(self, bot: Bot, access_service: AccessService) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        access_service: AccessService,
+        settings_service: SettingsService,
+    ) -> None:
         self.bot = bot
         self.access_service = access_service
+        self.settings_service = settings_service
 
     async def send_activated(self, telegram_id: int) -> bool:
         try:
@@ -37,10 +44,7 @@ class SubscriptionNotificationService:
                     for invite in invites
                 ]
             )
-        text = (
-            "✅ <b>Підписку успішно оформлено!</b>\n\n"
-            "Оплату підтверджено, доступ до клубу активовано."
-        )
+        text = await self.settings_service.get("payment_success_text")
         if invites:
             text += "\n\nНатисніть кнопку нижче, щоб доєднатися. Посилання персональне."
         else:

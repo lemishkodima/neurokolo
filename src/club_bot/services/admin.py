@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from club_bot.domain.enums import ResourceType
+from club_bot.domain.rules import as_utc, utc_now
 from club_bot.models import Admin, AppSetting, Plan, TelegramResource, plan_resources
 from club_bot.services.telegram_content import TelegramContent
 
@@ -34,9 +36,24 @@ DEFAULT_SETTINGS = {
         "<b>Закритий клуб</b> — уроки, оновлення, тематичні обговорення та підтримка "
         "в одному Telegram-просторі. Доступ діє, поки активна щомісячна підписка."
     ),
+    "welcome_text": (
+        "💎 <b>Ласкаво просимо до клубу!</b>\n\n"
+        "Тут зібрані уроки, практичні матеріали, тематичні гілки та спільнота. "
+        "Керуйте підпискою й доступом через меню нижче."
+    ),
+    "payment_success_text": (
+        "✅ <b>Підписку успішно оформлено!</b>\n\n"
+        "Оплату підтверджено, доступ до клубу активовано."
+    ),
+    "wayforpay_test_mode_until": "",
 }
 
 MENU_CONTENT_ACTIONS = frozenset({"about", "join", "subscription", "materials", "support"})
+WAYFORPAY_TEST_MODE_MINUTES = 30
+
+
+class ProtectedPlanError(RuntimeError):
+    pass
 
 
 class AdminService:
@@ -138,6 +155,27 @@ class SettingsService:
             support=rows.get("button_support", DEFAULT_SETTINGS["button_support"]),
         )
 
+    async def payment_test_mode_until(self) -> datetime | None:
+        value = await self.get("wayforpay_test_mode_until")
+        if not value:
+            return None
+        try:
+            expires_at = as_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+        return expires_at if expires_at > utc_now() else None
+
+    async def payment_test_mode_active(self) -> bool:
+        return await self.payment_test_mode_until() is not None
+
+    async def enable_payment_test_mode(self) -> datetime:
+        expires_at = utc_now() + timedelta(minutes=WAYFORPAY_TEST_MODE_MINUTES)
+        await self.set("wayforpay_test_mode_until", expires_at.isoformat())
+        return expires_at
+
+    async def disable_payment_test_mode(self) -> None:
+        await self.set("wayforpay_test_mode_until", "")
+
     async def menu_content(self, action: str) -> TelegramContent | None:
         self._validate_menu_action(action)
         async with self.session_factory() as session:
@@ -235,14 +273,22 @@ class CatalogService:
             )
             return list(result.all())
 
-    async def list_plans(self) -> list[Plan]:
+    async def list_plans(self, *, active: bool | None = None) -> list[Plan]:
         async with self.session_factory() as session:
+            statement = select(Plan).options(selectinload(Plan.resources))
+            if active is not None:
+                statement = statement.where(Plan.is_active.is_(active))
             result = await session.scalars(
-                select(Plan)
-                .options(selectinload(Plan.resources))
-                .order_by(Plan.is_active.desc(), Plan.sort_order, Plan.name)
+                statement.order_by(Plan.is_active.desc(), Plan.sort_order, Plan.name)
             )
             return list(result.unique().all())
+
+    async def get_plan(self, plan_id: uuid.UUID) -> Plan | None:
+        async with self.session_factory() as session:
+            plan: Plan | None = await session.scalar(
+                select(Plan).options(selectinload(Plan.resources)).where(Plan.id == plan_id)
+            )
+            return plan
 
     async def create_plan(self, *, name: str, price: Decimal, currency: str = "UAH") -> Plan:
         async with self.session_factory() as session, session.begin():
@@ -260,6 +306,42 @@ class CatalogService:
             session.add(plan)
             await session.flush()
             return plan
+
+    async def update_plan(
+        self,
+        plan_id: uuid.UUID,
+        *,
+        name: str | None = None,
+        price: Decimal | None = None,
+    ) -> Plan | None:
+        async with self.session_factory() as session, session.begin():
+            plan = await session.get(Plan, plan_id, with_for_update=True)
+            if plan is None:
+                return None
+            if name is not None:
+                plan.name = name
+            if price is not None:
+                plan.price = price
+            await session.flush()
+            return plan
+
+    async def archive_plan(self, plan_id: uuid.UUID) -> bool:
+        async with self.session_factory() as session, session.begin():
+            plan = await session.get(Plan, plan_id, with_for_update=True)
+            if plan is None:
+                return False
+            if plan.code == self.default_plan_code:
+                raise ProtectedPlanError("The default plan cannot be archived")
+            plan.is_active = False
+            return True
+
+    async def restore_plan(self, plan_id: uuid.UUID) -> bool:
+        async with self.session_factory() as session, session.begin():
+            plan = await session.get(Plan, plan_id, with_for_update=True)
+            if plan is None:
+                return False
+            plan.is_active = True
+            return True
 
     async def plan_resources(self, plan_id: uuid.UUID) -> list[tuple[TelegramResource, bool]]:
         async with self.session_factory() as session:

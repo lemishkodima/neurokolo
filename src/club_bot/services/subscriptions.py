@@ -56,12 +56,14 @@ class SubscriptionService:
         session_factory: async_sessionmaker[AsyncSession],
         wayforpay: WayForPayClient,
         *,
+        test_wayforpay: WayForPayClient | None = None,
         bot_username: str,
         service_url: str,
         default_return_url: str,
     ) -> None:
         self.session_factory = session_factory
         self.wayforpay = wayforpay
+        self.test_wayforpay = test_wayforpay or wayforpay
         self.bot_username = bot_username
         self.service_url = service_url
         self.default_return_url = default_return_url
@@ -74,14 +76,17 @@ class SubscriptionService:
         phone: str | None,
         referral_code: str | None,
         return_url: str | None,
+        test_mode: bool = False,
     ) -> CheckoutResponse:
         now = utc_now()
+        provider = self.test_wayforpay if test_mode else self.wayforpay
         async with self.session_factory() as session, session.begin():
             plan = await PlanRepository(session).by_code(plan_code)
             if plan is None:
                 raise PlanNotFoundError(plan_code)
             token = generate_public_token()
-            order_reference = f"CLUB-{now:%Y%m%d}-{token[:12]}"
+            prefix = "TEST" if test_mode else "CLUB"
+            order_reference = f"{prefix}-{now:%Y%m%d}-{token[:12]}"
             checkout = CheckoutSession(
                 public_token=token,
                 order_reference=order_reference,
@@ -95,12 +100,12 @@ class SubscriptionService:
             )
             session.add(checkout)
 
-            fields = self.wayforpay.build_purchase_payload(
+            fields = provider.build_purchase_payload(
                 order_reference=order_reference,
                 order_date=int(now.timestamp()),
                 amount=plan.price,
                 currency=plan.currency,
-                product_name=plan.name,
+                product_name=f"[TEST] {plan.name}" if test_mode else plan.name,
                 service_url=self.service_url,
                 return_url=return_url or self.default_return_url,
                 date_next=next_month(now),
@@ -111,7 +116,7 @@ class SubscriptionService:
                 checkout_token=token,
                 order_reference=order_reference,
                 bot_claim_url=f"https://t.me/{self.bot_username}?start=claim_{token}",
-                gateway_url=self.wayforpay.checkout_url,
+                gateway_url=provider.checkout_url,
                 gateway_fields=fields,
                 expires_at=checkout.expires_at,
             )
@@ -141,7 +146,7 @@ class SubscriptionService:
 
     async def process_callback(self, payload: dict[str, Any]) -> bool:
         """Persist a callback. Returns False when it is a duplicate delivery."""
-        self.wayforpay.verify_callback(payload)
+        self.verify_callback(payload)
         event_id = self._callback_fingerprint(payload)
         async with self.session_factory() as session, session.begin():
             duplicate = await session.scalar(
@@ -264,7 +269,7 @@ class SubscriptionService:
             provider_id = subscription.provider_subscription_id
 
         # Do not hold a database transaction open during a network request.
-        await self.wayforpay.suspend_recurring(provider_id)
+        await self._provider_for_order(provider_id).suspend_recurring(provider_id)
 
         async with self.session_factory() as session, session.begin():
             user = await UserRepository(session).by_telegram_id(telegram_id)
@@ -281,6 +286,16 @@ class SubscriptionService:
                 current_period_end=subscription.current_period_end,
                 cancel_at_period_end=True,
             )
+
+    def verify_callback(self, payload: dict[str, Any]) -> None:
+        order_reference = str(payload.get("orderReference", ""))
+        self._provider_for_order(order_reference).verify_callback(payload)
+
+    def callback_response(self, order_reference: str) -> dict[str, str | int]:
+        return self._provider_for_order(order_reference).callback_response(order_reference)
+
+    def _provider_for_order(self, order_reference: str) -> WayForPayClient:
+        return self.test_wayforpay if order_reference.startswith("TEST-") else self.wayforpay
 
     async def _activate_checkout(
         self,
@@ -308,6 +323,11 @@ class SubscriptionService:
             current_period_end=next_month(now),
             billing_amount=checkout.amount,
             billing_currency=checkout.currency,
+            provider=(
+                "wayforpay_test"
+                if checkout.order_reference.startswith("TEST-")
+                else "wayforpay"
+            ),
             provider_subscription_id=checkout.order_reference,
             provider_rec_token=rec_token,
         )

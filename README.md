@@ -97,14 +97,17 @@ Set the permanent owner IDs in `ADMIN_TELEGRAM_IDS` (JSON list) and restart the 
 
 The panel supports:
 
-- creating tariffs and selecting their channel/group resources;
+- creating tariffs, editing their names/prices, selecting channel/group resources, and safely
+  archiving/restoring non-default tariffs;
 - reviewing resources captured automatically when the bot is added as an administrator;
 - creating rich-text, media, and album broadcasts for all users or active subscribers;
 - adding URL buttons to a broadcast and previewing it before queueing;
 - downloading an HTML statistics report;
 - editing the club description and menu labels;
+- editing the formatted `/start` message and the successful-payment message;
 - assigning a formatted post, photo/video, media album, and optional URL buttons to each main
   user-menu action;
+- enabling isolated WayForPay test checkout for 30 minutes from the admin panel;
 - adding and revoking additional administrator IDs.
 
 For Telegram access management, add the bot as an administrator to every private channel and
@@ -114,6 +117,27 @@ membership update used for automatic registration.
 
 When the database has one active tariff, users are never asked to select it; the configured
 `DEFAULT_PLAN_CODE` is used. The tariff editor remains visible only to administrators.
+
+Tariff deletion is implemented as an archive operation. It removes the tariff from new checkout
+choices while preserving historical checkout, payment, subscription, and entitlement records.
+The `DEFAULT_PLAN_CODE` tariff cannot be archived, but its display name and price can be edited.
+Price changes apply only to newly created checkout sessions because existing checkout and
+subscription amounts are immutable snapshots.
+
+### WayForPay test payments
+
+Open `/admin` → `💳 Оплата WayForPay` → `🧪 Увімкнути тестовий режим`. After confirmation,
+all newly created checkout sessions use WayForPay's documented test merchant for 30 minutes.
+The mode expires automatically and can also be disabled manually.
+
+Production and test orders have separate `CLUB-*` and `TEST-*` references. Each callback is
+verified with the matching merchant key, so switching the admin toggle cannot reinterpret an
+already-created order. A successful test callback intentionally exercises the real application
+flow and can activate a Telegram subscription/invite, but does not charge real funds. Do not
+share the public checkout link while the global test window is active.
+
+WayForPay documents its integration test merchant separately from production credentials:
+https://wiki.wayforpay.com/en/view/852472
 
 ## CLI configuration (alternative)
 

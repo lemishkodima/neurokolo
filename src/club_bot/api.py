@@ -91,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.2.0-rc6", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.3.0-rc1", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -184,7 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload = await request.json()
         order_reference = str(payload.get("orderReference", ""))
         try:
-            container.wayforpay.verify_callback(payload)
+            container.subscription_service.verify_callback(payload)
             initial_checkout = await container.subscription_service.is_initial_checkout_callback(
                 order_reference
             )
@@ -200,7 +200,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             if telegram_id is not None:
                 await container.subscription_notification_service.send_activated(telegram_id)
-        return container.wayforpay.callback_response(order_reference)
+        return container.subscription_service.callback_response(order_reference)
 
     @app.post(
         "/api/v1/checkout-sessions",
@@ -212,12 +212,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: Container = Depends(container_from_request),
     ) -> CheckoutResponse:
         try:
+            test_mode = await container.settings_service.payment_test_mode_active()
             return await container.subscription_service.create_checkout(
                 plan_code=data.plan_code or container.settings.default_plan_code,
                 email=str(data.email) if data.email else None,
                 phone=data.phone,
                 referral_code=data.referral_code,
                 return_url=data.return_url,
+                test_mode=test_mode,
             )
         except PlanNotFoundError as error:
             raise HTTPException(
@@ -230,12 +232,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         container: Container = Depends(container_from_request),
     ) -> HTMLResponse:
         try:
+            test_mode = await container.settings_service.payment_test_mode_active()
             checkout = await container.subscription_service.create_checkout(
                 plan_code=container.settings.default_plan_code,
                 email=None,
                 phone=None,
                 referral_code=referral_code,
                 return_url=None,
+                test_mode=test_mode,
             )
         except PlanNotFoundError as error:
             raise HTTPException(
@@ -256,6 +260,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         form_action = f"{gateway_parts.scheme}://{gateway_parts.netloc}"
         script_nonce = secrets.token_urlsafe(18)
         escaped_script_nonce = escape(script_nonce, quote=True)
+        test_notice = (
+            "<p><b>Тестовий режим:</b> реального списання коштів не буде.</p>"
+            if test_mode
+            else ""
+        )
         body = f"""<!doctype html>
 <html lang="uk">
 <head>
@@ -280,6 +289,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 <body>
   <main>
     <h1>Підписка Neurokolo</h1>
+    {test_notice}
     <p>Переходимо на захищену платіжну сторінку WayForPay…</p>
     <form id="wayforpay-checkout" method="post" action="{gateway_url}">
       {_gateway_form_inputs(gateway_fields)}

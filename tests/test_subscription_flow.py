@@ -20,7 +20,7 @@ from club_bot.domain.enums import (
     SubscriptionStatus,
 )
 from club_bot.domain.rules import as_utc, utc_now
-from club_bot.integrations.wayforpay import WayForPayClient
+from club_bot.integrations.wayforpay import InvalidWayForPaySignature, WayForPayClient
 from club_bot.models import (
     Base,
     CheckoutSession,
@@ -68,11 +68,21 @@ async def services(
         checkout_url="https://secure.example.test/pay",
         http_client=http_client,
     )
+    test_wayforpay = WayForPayClient(
+        merchant_account="test_merchant",
+        merchant_domain="example.com",
+        secret_key="test-secret",
+        merchant_password="test-password",
+        api_url="https://api.example.test/regularApi",
+        checkout_url="https://secure.example.test/pay",
+        http_client=http_client,
+    )
     yield (
         UserService(session_factory),
         SubscriptionService(
             session_factory,
             wayforpay,
+            test_wayforpay=test_wayforpay,
             bot_username="club_bot",
             service_url="https://bot.example.com/webhooks/wayforpay",
             default_return_url="https://example.com/complete",
@@ -241,6 +251,83 @@ async def test_approved_callback_with_wrong_payment_terms_does_not_activate(
         assert payment.failure_reason == "Payment amount or currency mismatch"
 
 
+async def test_test_checkout_uses_isolated_provider_and_signature(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    _, subscriptions, production_wayforpay = services
+    async with session_factory() as session, session.begin():
+        session.add(Plan(code="base", name="Base", price=990, currency="UAH"))
+
+    checkout = await subscriptions.create_checkout(
+        plan_code="base",
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+        test_mode=True,
+    )
+    assert checkout.order_reference.startswith("TEST-")
+    assert checkout.gateway_fields["merchantAccount"] == "test_merchant"
+    assert checkout.gateway_fields["productName"] == ["[TEST] Base"]
+
+    callback = {
+        "merchantAccount": "test_merchant",
+        "orderReference": checkout.order_reference,
+        "amount": "990.00",
+        "currency": "UAH",
+        "authCode": "test-auth",
+        "cardPan": "42****42",
+        "transactionStatus": "Approved",
+        "reasonCode": 1100,
+        "processingDate": 1_700_000_000,
+    }
+    callback["merchantSignature"] = subscriptions.test_wayforpay._sign(
+        [
+            callback[key]
+            for key in (
+                "merchantAccount",
+                "orderReference",
+                "amount",
+                "currency",
+                "authCode",
+                "cardPan",
+                "transactionStatus",
+                "reasonCode",
+            )
+        ]
+    )
+    subscriptions.verify_callback(callback)
+    assert await subscriptions.process_callback(callback) is True
+
+    telegram_user = TelegramUser(id=987, is_bot=False, first_name="Test Admin")
+    await UserService(session_factory).upsert_telegram_user(telegram_user)
+    claim = await subscriptions.claim_checkout(checkout.checkout_token, telegram_user.id)
+    assert claim.subscription is not None
+    assert claim.subscription.provider == "wayforpay_test"
+
+    forged_with_production = dict(callback)
+    forged_with_production["merchantAccount"] = production_wayforpay.merchant_account
+    forged_with_production["merchantSignature"] = production_wayforpay._sign(
+        [
+            forged_with_production[key]
+            for key in (
+                "merchantAccount",
+                "orderReference",
+                "amount",
+                "currency",
+                "authCode",
+                "cardPan",
+                "transactionStatus",
+                "reasonCode",
+            )
+        ]
+    )
+    with pytest.raises(InvalidWayForPaySignature):
+        subscriptions.verify_callback(forged_with_production)
+
+
 async def test_referral_registration(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     services: tuple[UserService, SubscriptionService, WayForPayClient],
@@ -275,15 +362,21 @@ async def test_activation_notification_contains_personal_invite_button() -> None
         async def send_message(self, chat_id: int, text: str, reply_markup: object) -> None:
             self.messages.append((chat_id, text, reply_markup))
 
+    class FakeSettingsService:
+        async def get(self, key: str) -> str:
+            assert key == "payment_success_text"
+            return "✅ <b>Власний текст успішної оплати</b>"
+
     bot = FakeBot()
     service = SubscriptionNotificationService(  # type: ignore[arg-type]
         bot,
         FakeAccessService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
     )
     assert await service.send_activated(123) is True
     chat_id, text, markup = bot.messages[0]
     assert chat_id == 123
-    assert "Підписку успішно оформлено" in text
+    assert "Власний текст успішної оплати" in text
     assert markup.inline_keyboard[0][0].text == "Доєднатися 💎"  # type: ignore[union-attr]
     assert markup.inline_keyboard[0][0].url == "https://t.me/+personal"  # type: ignore[union-attr]
 

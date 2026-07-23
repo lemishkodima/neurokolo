@@ -13,7 +13,12 @@ from club_bot.bot.routers import router
 from club_bot.bot.system_router import system_router
 from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
-from club_bot.integrations.wayforpay import WayForPayClient
+from club_bot.integrations.wayforpay import (
+    WAYFORPAY_TEST_MERCHANT_ACCOUNT,
+    WAYFORPAY_TEST_MERCHANT_PASSWORD,
+    WAYFORPAY_TEST_SECRET_KEY,
+    WayForPayClient,
+)
 from club_bot.services.access import AccessService
 from club_bot.services.admin import AdminService, CatalogService, SettingsService
 from club_bot.services.broadcasts import BroadcastService
@@ -86,10 +91,20 @@ def build_container(settings: Settings) -> Container:
         checkout_url=settings.wayforpay_checkout_url,
         http_client=http_client,
     )
+    test_wayforpay = WayForPayClient(
+        merchant_account=WAYFORPAY_TEST_MERCHANT_ACCOUNT,
+        merchant_domain=settings.wayforpay_merchant_domain,
+        secret_key=WAYFORPAY_TEST_SECRET_KEY,
+        merchant_password=WAYFORPAY_TEST_MERCHANT_PASSWORD,
+        api_url=settings.wayforpay_api_url,
+        checkout_url=settings.wayforpay_checkout_url,
+        http_client=http_client,
+    )
     user_service = UserService(session_factory)
     subscription_service = SubscriptionService(
         session_factory,
         wayforpay,
+        test_wayforpay=test_wayforpay,
         bot_username=settings.bot_username,
         service_url=settings.wayforpay_service_url,
         default_return_url=settings.membership_site_url,
@@ -109,7 +124,11 @@ def build_container(settings: Settings) -> Container:
         batch_size=settings.broadcast_batch_size,
     )
     stats_service = StatsService(session_factory)
-    subscription_notification_service = SubscriptionNotificationService(bot, access_service)
+    subscription_notification_service = SubscriptionNotificationService(
+        bot,
+        access_service,
+        settings_service,
+    )
     return Container(
         settings=settings,
         engine=engine,

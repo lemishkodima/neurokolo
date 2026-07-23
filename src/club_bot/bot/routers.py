@@ -33,13 +33,6 @@ router = Router(name="club")
 logger = logging.getLogger(__name__)
 
 
-WELCOME = (
-    "💎 <b>Ласкаво просимо до клубу!</b>\n\n"
-    "Тут зібрані уроки, практичні матеріали, тематичні гілки та спільнота. "
-    "Керуйте підпискою й доступом через меню нижче."
-)
-
-
 @router.message(CommandStart())
 async def start(
     message: Message,
@@ -80,7 +73,7 @@ async def start(
             )
         return
 
-    await message.answer(WELCOME, reply_markup=main_menu(labels))
+    await message.answer(await settings_service.get("welcome_text"), reply_markup=main_menu(labels))
 
 
 @router.message(Command("about"))

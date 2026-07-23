@@ -22,6 +22,12 @@ def admin_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✏️ Тексти й кнопки", callback_data="adm:settings"),
                 InlineKeyboardButton(text="👮 Адміністратори", callback_data="adm:admins"),
             ],
+            [
+                InlineKeyboardButton(
+                    text="💳 Оплата WayForPay",
+                    callback_data="adm:payments",
+                )
+            ],
         ]
     )
 
@@ -45,12 +51,82 @@ def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
         for plan in plans
     ]
     rows.append([InlineKeyboardButton(text="➕ Створити тариф", callback_data="adm:plan_new")])
+    rows.append(
+        [InlineKeyboardButton(text="🗄 Видалені тарифи", callback_data="adm:plans_archived")]
+    )
     rows.append([InlineKeyboardButton(text="← Назад", callback_data="adm:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def plan_actions_keyboard(plan: Plan, *, can_archive: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Змінити назву",
+                callback_data=f"adm:plan_name:{plan.id}",
+            ),
+            InlineKeyboardButton(
+                text="💰 Змінити ціну",
+                callback_data=f"adm:plan_price:{plan.id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="💬 Канали та групи",
+                callback_data=f"adm:plan_resources:{plan.id}",
+            )
+        ],
+    ]
+    if can_archive:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Видалити тариф",
+                    callback_data=f"adm:plan_delete:{plan.id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="← До тарифів", callback_data="adm:plans")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def archived_plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"↩️ {plan.name} · {plan.price} {plan.currency}",
+                callback_data=f"adm:plan_restore:{plan.id}",
+            )
+        ]
+        for plan in plans
+    ]
+    rows.append([InlineKeyboardButton(text="← До тарифів", callback_data="adm:plans")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def plan_delete_confirm_keyboard(plan_id: uuid.UUID) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Так, видалити",
+                    callback_data=f"adm:plan_del_yes:{plan_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Ні, повернутися",
+                    callback_data=f"adm:plan:{plan_id}",
+                )
+            ],
+        ]
+    )
+
+
 def plan_resources_keyboard(
     resources: list[tuple[TelegramResource, bool]],
+    *,
+    plan_id: uuid.UUID,
 ) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -63,7 +139,12 @@ def plan_resources_keyboard(
     ]
     rows.extend(
         [
-            [InlineKeyboardButton(text="← До тарифів", callback_data="adm:plans")],
+            [
+                InlineKeyboardButton(
+                    text="← До тарифу",
+                    callback_data=f"adm:plan:{plan_id}",
+                )
+            ],
             [InlineKeyboardButton(text="Адмін-меню", callback_data="adm:home")],
         ]
     )
@@ -82,6 +163,20 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label, callback_data=f"adm:setting:{key}")]
         for label, key in fields
     ]
+    rows[0:0] = [
+        [
+            InlineKeyboardButton(
+                text="👋 Стартове повідомлення",
+                callback_data="adm:setting:welcome_text",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Повідомлення після оплати",
+                callback_data="adm:setting:payment_success_text",
+            )
+        ],
+    ]
     rows.append(
         [
             InlineKeyboardButton(
@@ -92,6 +187,40 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     )
     rows.append([InlineKeyboardButton(text="← Назад", callback_data="adm:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payments_keyboard(*, test_mode: bool) -> InlineKeyboardMarkup:
+    toggle = (
+        InlineKeyboardButton(
+            text="🔴 Вимкнути тестовий режим",
+            callback_data="adm:payment_test_disable",
+        )
+        if test_mode
+        else InlineKeyboardButton(
+            text="🧪 Увімкнути тестовий режим",
+            callback_data="adm:payment_test_enable",
+        )
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [toggle],
+            [InlineKeyboardButton(text="← Адмін-меню", callback_data="adm:home")],
+        ]
+    )
+
+
+def payment_test_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🧪 Увімкнути на 30 хв",
+                    callback_data="adm:payment_test_confirm",
+                )
+            ],
+            [InlineKeyboardButton(text="Скасувати", callback_data="adm:payments")],
+        ]
+    )
 
 
 def menu_content_keyboard(configured: set[str]) -> InlineKeyboardMarkup:

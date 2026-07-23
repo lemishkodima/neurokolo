@@ -21,6 +21,12 @@ class InvalidWayForPaySignature(WayForPayError):
     pass
 
 
+# Public integration credentials published by WayForPay for test payments.
+WAYFORPAY_TEST_MERCHANT_ACCOUNT = "test_merch_n1"
+WAYFORPAY_TEST_SECRET_KEY = "flk3409refn54t54t*FNJRET"
+WAYFORPAY_TEST_MERCHANT_PASSWORD = "d485396ae413eb60dc251b0899b261c2"
+
+
 class WayForPayClient:
     def __init__(
         self,

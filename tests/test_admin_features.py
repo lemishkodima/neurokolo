@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from aiogram.enums import ChatMemberStatus, ChatType
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,8 +14,13 @@ from club_bot.bot.admin_router import _parse_buttons
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import BroadcastStatus, BroadcastTarget, DeliveryStatus, ResourceType
-from club_bot.models import Base, Broadcast, BroadcastRecipient, TelegramResource, User
-from club_bot.services.admin import AdminService, CatalogService, SettingsService
+from club_bot.models import Base, Broadcast, BroadcastRecipient, Plan, TelegramResource, User
+from club_bot.services.admin import (
+    AdminService,
+    CatalogService,
+    ProtectedPlanError,
+    SettingsService,
+)
 from club_bot.services.broadcasts import BroadcastService
 from club_bot.services.stats import StatsService
 from club_bot.services.telegram_content import TelegramContent
@@ -42,6 +48,18 @@ async def test_admin_access_and_dynamic_settings(tmp_path: Path) -> None:
     assert (await settings.labels()).about == "Про клуб 💎"
     await settings.set("button_about", "Про спільноту")
     assert (await settings.labels()).about == "Про спільноту"
+    assert "Ласкаво просимо" in await settings.get("welcome_text")
+    await settings.set("welcome_text", "<b>Новий старт</b>")
+    await settings.set("payment_success_text", "Оплата успішна")
+    assert await settings.get("welcome_text") == "<b>Новий старт</b>"
+    assert await settings.get("payment_success_text") == "Оплата успішна"
+
+    assert await settings.payment_test_mode_active() is False
+    expires_at = await settings.enable_payment_test_mode()
+    assert await settings.payment_test_mode_active() is True
+    assert await settings.payment_test_mode_until() == expires_at
+    await settings.disable_payment_test_mode()
+    assert await settings.payment_test_mode_active() is False
 
     content = TelegramContent(
         source_chat_id=402152266,
@@ -72,6 +90,37 @@ async def test_resources_are_registered_and_assigned_to_plan(tmp_path: Path) -> 
     assigned = await catalog.plan_resources(plan.id)
     assert [(item.chat_id, selected) for item, selected in assigned] == [(-100123, True)]
     assert await catalog.toggle_plan_resource(plan.id, resource.id) is False
+
+
+async def test_plan_edit_archive_restore_and_default_protection(tmp_path: Path) -> None:
+    session_factory = await _database(tmp_path)
+    catalog = CatalogService(session_factory, default_plan_code="club")
+    default_plan = await catalog.create_plan(name="Club", price=Decimal("990"))
+    second_plan = await catalog.create_plan(name="VIP", price=Decimal("1490"))
+
+    updated = await catalog.update_plan(
+        second_plan.id,
+        name="VIP Plus",
+        price=Decimal("1990.00"),
+    )
+    assert updated is not None
+    assert updated.name == "VIP Plus"
+    assert updated.price == Decimal("1990.00")
+
+    assert await catalog.archive_plan(second_plan.id) is True
+    assert [item.id for item in await catalog.list_plans(active=True)] == [default_plan.id]
+    assert [item.id for item in await catalog.list_plans(active=False)] == [second_plan.id]
+    assert await catalog.restore_plan(second_plan.id) is True
+    assert {item.id for item in await catalog.list_plans(active=True)} == {
+        default_plan.id,
+        second_plan.id,
+    }
+
+    with pytest.raises(ProtectedPlanError):
+        await catalog.archive_plan(default_plan.id)
+
+    async with session_factory() as session:
+        assert await session.get(Plan, second_plan.id) is not None
 
 
 async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:

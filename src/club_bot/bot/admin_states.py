@@ -6,6 +6,11 @@ class PlanCreateStates(StatesGroup):
     price = State()
 
 
+class PlanEditStates(StatesGroup):
+    name = State()
+    price = State()
+
+
 class AdminAddStates(StatesGroup):
     telegram_id = State()
 

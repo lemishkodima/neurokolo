@@ -13,11 +13,16 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from club_bot.bot.admin_keyboards import (
     admin_menu,
     admins_keyboard,
+    archived_plans_keyboard,
     back_to_admin,
     broadcast_confirm_keyboard,
     broadcast_menu,
     broadcast_target_keyboard,
     menu_content_keyboard,
+    payment_test_confirm_keyboard,
+    payments_keyboard,
+    plan_actions_keyboard,
+    plan_delete_confirm_keyboard,
     plan_resources_keyboard,
     plans_keyboard,
     settings_keyboard,
@@ -27,10 +32,17 @@ from club_bot.bot.admin_states import (
     BroadcastCreateStates,
     MenuContentStates,
     PlanCreateStates,
+    PlanEditStates,
     SettingEditStates,
 )
 from club_bot.domain.enums import BroadcastTarget
-from club_bot.services.admin import AdminService, CatalogService, SettingsService
+from club_bot.models import Plan
+from club_bot.services.admin import (
+    AdminService,
+    CatalogService,
+    ProtectedPlanError,
+    SettingsService,
+)
 from club_bot.services.broadcasts import BroadcastService
 from club_bot.services.stats import StatsService
 from club_bot.services.telegram_content import (
@@ -40,6 +52,13 @@ from club_bot.services.telegram_content import (
 )
 
 admin_router = Router(name="admin")
+RICH_TEXT_SETTINGS = frozenset(
+    {
+        "club_about_text",
+        "welcome_text",
+        "payment_success_text",
+    }
+)
 
 
 async def _authorized(event: Message | CallbackQuery, admin_service: AdminService) -> bool:
@@ -52,6 +71,16 @@ async def _authorized(event: Message | CallbackQuery, admin_service: AdminServic
         else:
             await event.answer("Команда недоступна.")
     return allowed
+
+
+def _plan_details(plan: Plan) -> str:
+    return (
+        f"<b>{escape(plan.name)}</b>\n"
+        f"Ціна: <b>{plan.price} {plan.currency}</b> / місяць\n"
+        f"Ресурсів: <b>{len(plan.resources)}</b>\n"
+        f"Код: <code>{escape(plan.code)}</code>\n\n"
+        "Оберіть, що потрібно змінити."
+    )
 
 
 @admin_router.message(Command("admin"))
@@ -80,7 +109,7 @@ async def show_plans(
 ) -> None:
     if not await _authorized(callback, admin_service):
         return
-    plans = await catalog_service.list_plans()
+    plans = await catalog_service.list_plans(active=True)
     text = "Тарифи визначають, до яких каналів і груп бот видає доступ."
     if not plans:
         text += "\n\nПоки немає жодного тарифу."
@@ -129,7 +158,7 @@ async def plan_price(
     await state.clear()
     await message.answer(
         f"✅ Тариф «{escape(plan.name)}» створено. Тепер виберіть для нього ресурси.",
-        reply_markup=plans_keyboard(await catalog_service.list_plans()),
+        reply_markup=plans_keyboard(await catalog_service.list_plans(active=True)),
     )
 
 
@@ -143,13 +172,46 @@ async def select_plan(
     if not await _authorized(callback, admin_service) or callback.data is None:
         return
     plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
+    await state.update_data(selected_plan_id=str(plan_id))
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            _plan_details(plan),
+            reply_markup=plan_actions_keyboard(
+                plan,
+                can_archive=plan.code != catalog_service.default_plan_code,
+            ),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_resources:"))
+async def show_plan_resources(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
     await state.update_data(selected_plan_id=str(plan_id))
     resources = await catalog_service.plan_resources(plan_id)
-    text = "Оберіть канали й групи, доступні за цим тарифом:"
+    text = f"Оберіть канали й групи для тарифу «{escape(plan.name)}»:"
     if not resources:
         text += "\n\nДодайте бота адміністратором до потрібного каналу або групи."
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=plan_resources_keyboard(resources))
+        await callback.message.edit_text(
+            text,
+            reply_markup=plan_resources_keyboard(resources, plan_id=plan_id),
+        )
     await callback.answer()
 
 
@@ -171,8 +233,211 @@ async def toggle_plan_resource(
     selected = await catalog_service.toggle_plan_resource(plan_id, resource_id)
     resources = await catalog_service.plan_resources(plan_id)
     if isinstance(callback.message, Message):
-        await callback.message.edit_reply_markup(reply_markup=plan_resources_keyboard(resources))
+        await callback.message.edit_reply_markup(
+            reply_markup=plan_resources_keyboard(resources, plan_id=plan_id)
+        )
     await callback.answer("Додано" if selected else "Прибрано")
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_name:"))
+async def edit_plan_name(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(selected_plan_id=str(plan_id))
+    await state.set_state(PlanEditStates.name)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Поточна назва: <b>{escape(plan.name)}</b>\n\nВведіть нову назву тарифу:"
+        )
+    await callback.answer()
+
+
+@admin_router.message(PlanEditStates.name)
+async def save_plan_name(
+    message: Message,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    name = message.text.strip()
+    if not name or len(name) > 255:
+        await message.answer("Назва має містити від 1 до 255 символів.")
+        return
+    data = await state.get_data()
+    plan = await catalog_service.update_plan(
+        uuid.UUID(str(data["selected_plan_id"])),
+        name=name,
+    )
+    await state.clear()
+    if plan is None:
+        await message.answer("Тариф не знайдено.", reply_markup=admin_menu())
+        return
+    await message.answer(
+        "✅ Назву тарифу оновлено.",
+        reply_markup=plan_actions_keyboard(
+            plan,
+            can_archive=plan.code != catalog_service.default_plan_code,
+        ),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_price:"))
+async def edit_plan_price(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(selected_plan_id=str(plan_id))
+    await state.set_state(PlanEditStates.price)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Поточна ціна: <b>{plan.price} {plan.currency}</b>\n\n"
+            "Введіть нову щомісячну ціну в UAH:"
+        )
+    await callback.answer()
+
+
+@admin_router.message(PlanEditStates.price)
+async def save_plan_price(
+    message: Message,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        price = Decimal(message.text.replace(",", ".")).quantize(Decimal("0.01"))
+        if price <= 0:
+            raise InvalidOperation
+    except InvalidOperation:
+        await message.answer("Некоректна ціна. Введіть додатне число, наприклад 990.")
+        return
+    data = await state.get_data()
+    plan = await catalog_service.update_plan(
+        uuid.UUID(str(data["selected_plan_id"])),
+        price=price,
+    )
+    await state.clear()
+    if plan is None:
+        await message.answer("Тариф не знайдено.", reply_markup=admin_menu())
+        return
+    await message.answer(
+        "✅ Ціну тарифу оновлено. Нові checkout використовуватимуть нову ціну; "
+        "вже створені оплати й підписки не змінено.",
+        reply_markup=plan_actions_keyboard(
+            plan,
+            can_archive=plan.code != catalog_service.default_plan_code,
+        ),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_delete:"))
+async def confirm_plan_delete(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
+    if plan.code == catalog_service.default_plan_code:
+        await callback.answer(
+            "Основний тариф не можна видалити. Його можна перейменувати та змінити ціну.",
+            show_alert=True,
+        )
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Видалити тариф «{escape(plan.name)}»?\n\n"
+            "Він зникне з нових оплат, але історичні підписки та платежі збережуться.",
+            reply_markup=plan_delete_confirm_keyboard(plan_id),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_del_yes:"))
+async def delete_plan(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    try:
+        removed = await catalog_service.archive_plan(plan_id)
+    except ProtectedPlanError:
+        await callback.answer("Основний тариф не можна видалити", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "✅ Тариф видалено." if removed else "Тариф не знайдено.",
+            reply_markup=plans_keyboard(await catalog_service.list_plans(active=True)),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:plans_archived")
+async def show_archived_plans(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    plans = await catalog_service.list_plans(active=False)
+    text = "Видалені тарифи можна відновити без втрати історії."
+    if not plans:
+        text += "\n\nВидалених тарифів немає."
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=archived_plans_keyboard(plans))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_restore:"))
+async def restore_plan(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    restored = await catalog_service.restore_plan(plan_id)
+    plans = await catalog_service.list_plans(active=False)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "✅ Тариф відновлено." if restored else "Тариф не знайдено.",
+            reply_markup=archived_plans_keyboard(plans),
+        )
+    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "adm:resources")
@@ -194,6 +459,90 @@ async def show_resources(
     if isinstance(callback.message, Message):
         await callback.message.edit_text("".join(lines), reply_markup=back_to_admin())
     await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:payments")
+async def show_payments(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    expires_at = await settings_service.payment_test_mode_until()
+    if expires_at is None:
+        text = (
+            "<b>WayForPay: бойовий режим</b>\n\n"
+            "Нові checkout використовують production-магазин і можуть списувати реальні кошти."
+        )
+    else:
+        text = (
+            "<b>🧪 WayForPay: тестовий режим</b>\n\n"
+            f"Автоматично вимкнеться о <b>{expires_at:%H:%M UTC}</b>. "
+            "Нові checkout використовують офіційний тестовий магазин WayForPay; "
+            "реальні кошти не списуються."
+        )
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            text,
+            reply_markup=payments_keyboard(test_mode=expires_at is not None),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:payment_test_enable")
+async def confirm_payment_test_mode(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "<b>Увімкнути тестові платежі?</b>\n\n"
+            "Протягом 30 хвилин усі нові checkout будуть тестовими. Тестовий approved callback "
+            "активує підписку та видає Telegram-доступ, щоб можна було перевірити весь сценарій. "
+            "Не поширюйте платіжне посилання під час тесту.",
+            reply_markup=payment_test_confirm_keyboard(),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:payment_test_confirm")
+async def enable_payment_test_mode(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    expires_at = await settings_service.enable_payment_test_mode()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "<b>🧪 Тестовий режим увімкнено.</b>\n\n"
+            f"Він автоматично вимкнеться о <b>{expires_at:%H:%M UTC}</b>. "
+            "Відкрийте користувацьку кнопку «Доєднатися» та завершіть тестову оплату.",
+            reply_markup=payments_keyboard(test_mode=True),
+        )
+    await callback.answer("Тестовий режим активний")
+
+
+@admin_router.callback_query(F.data == "adm:payment_test_disable")
+async def disable_payment_test_mode(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    settings_service: SettingsService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await settings_service.disable_payment_test_mode()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "<b>WayForPay: бойовий режим</b>\n\n"
+            "Тестовий режим вимкнено. Усі нові checkout використовують production-магазин.",
+            reply_markup=payments_keyboard(test_mode=False),
+        )
+    await callback.answer("Бойовий режим активний")
 
 
 @admin_router.callback_query(F.data == "adm:settings")
@@ -223,8 +572,8 @@ async def edit_setting(
     await state.update_data(setting_key=key)
     await state.set_state(SettingEditStates.value)
     prompt = (
-        "Надішліть новий текст. Telegram-форматування буде збережене."
-        if key == "club_about_text"
+        "Надішліть новий текст повідомлення. Telegram-форматування буде збережене."
+        if key in RICH_TEXT_SETTINGS
         else "Надішліть новий текст кнопки (до 64 символів)."
     )
     if isinstance(callback.message, Message):
@@ -243,8 +592,11 @@ async def save_setting(
         return
     data = await state.get_data()
     key = str(data["setting_key"])
-    value = message.html_text if key == "club_about_text" else (message.text or "").strip()
-    if not value or (key != "club_about_text" and len(value) > 64):
+    rich_text = key in RICH_TEXT_SETTINGS
+    plain_text = (message.text or "").strip()
+    value = message.html_text if rich_text else plain_text
+    limit = 4096 if rich_text else 64
+    if not plain_text or len(plain_text) > limit:
         await message.answer("Значення порожнє або задовге. Спробуйте ще раз.")
         return
     await settings_service.set(key, value)

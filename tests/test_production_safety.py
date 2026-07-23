@@ -109,6 +109,7 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
     app.state.container = SimpleNamespace(
         settings=settings,
         subscription_service=SimpleNamespace(create_checkout=create_checkout),
+        settings_service=SimpleNamespace(payment_test_mode_active=AsyncMock(return_value=False)),
     )
     transport = httpx.ASGITransport(app=app)
 
@@ -143,6 +144,7 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         phone=None,
         referral_code="friend",
         return_url=None,
+        test_mode=False,
     )
 
     assert completion_page.status_code == 200
