@@ -185,7 +185,12 @@ async def test_paid_checkout_claim_and_idempotency(
             select(CheckoutSession).where(CheckoutSession.public_token == checkout.checkout_token)
         )
         assert stored_checkout is not None
+        stored_payment = await session.scalar(
+            select(Payment).where(Payment.checkout_session_id == stored_checkout.id)
+        )
         assert stored_checkout.status == CheckoutStatus.CLAIMED
+        assert stored_payment is not None
+        assert stored_payment.subscription_id == claim.subscription.id
 
 
 async def test_personal_checkout_activates_without_manual_claim(

@@ -6,7 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -155,6 +155,16 @@ class SubscriptionService:
             if checkout.status not in (CheckoutStatus.PAID, CheckoutStatus.CLAIMED):
                 return ClaimResult(paid=False, subscription=None)
             subscription = await self._activate_checkout(session, checkout)
+            await session.execute(
+                update(Payment)
+                .where(
+                    Payment.checkout_session_id == checkout.id,
+                    Payment.status == PaymentStatus.APPROVED,
+                    Payment.subscription_id.is_(None),
+                    Payment.failure_reason.is_(None),
+                )
+                .values(subscription_id=subscription.id)
+            )
             return ClaimResult(paid=True, subscription=subscription)
 
     async def process_callback(self, payload: dict[str, Any]) -> bool:
