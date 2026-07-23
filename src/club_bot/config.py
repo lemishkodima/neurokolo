@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     def wayforpay_service_url(self) -> str:
         return f"{self.public_base_url}/webhooks/wayforpay"
 
+    @property
+    def landing_base_url(self) -> str:
+        parsed = urlparse(self.membership_site_url)
+        return f"{parsed.scheme}://{parsed.netloc}"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -4,7 +4,7 @@ import uuid
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from club_bot.models import Plan, TelegramResource
+from club_bot.models import LandingTemplate, Plan, TelegramResource
 
 
 def admin_menu() -> InlineKeyboardMarkup:
@@ -26,7 +26,11 @@ def admin_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="💳 Оплата WayForPay",
                     callback_data="adm:payments",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🌐 HTML-вступ",
+                    callback_data="adm:landings",
+                ),
             ],
         ]
     )
@@ -205,6 +209,109 @@ def payments_keyboard(*, test_mode: bool) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [toggle],
             [InlineKeyboardButton(text="← Адмін-меню", callback_data="adm:home")],
+        ]
+    )
+
+
+def landing_templates_keyboard(templates: list[LandingTemplate]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"🌐 {template.name} · /{template.slug}",
+                callback_data=f"adm:landing:{template.id}",
+            )
+        ]
+        for template in templates
+    ]
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="➕ Додати HTML-шаблон",
+                    callback_data="adm:landing_new",
+                )
+            ],
+            [InlineKeyboardButton(text="← Адмін-меню", callback_data="adm:home")],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def landing_template_actions_keyboard(
+    template: LandingTemplate,
+    *,
+    public_url: str,
+) -> InlineKeyboardMarkup:
+    template_id = template.id
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Відкрити сторінку", url=public_url)],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Назва",
+                    callback_data=f"adm:landing_edit:n:{template_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🔗 Slug",
+                    callback_data=f"adm:landing_edit:s:{template_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🪧 Заголовок",
+                    callback_data=f"adm:landing_edit:t:{template_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📣 Назва каналу",
+                    callback_data=f"adm:landing_edit:c:{template_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📝 Опис",
+                    callback_data=f"adm:landing_edit:d:{template_id}",
+                ),
+                InlineKeyboardButton(
+                    text="⬇️ Download URL",
+                    callback_data=f"adm:landing_edit:u:{template_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧩 Замінити HTML",
+                    callback_data=f"adm:landing_edit:h:{template_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📥 Завантажити HTML",
+                    callback_data=f"adm:landing_html:{template_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Видалити",
+                    callback_data=f"adm:landing_delete:{template_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="← До шаблонів", callback_data="adm:landings")],
+        ]
+    )
+
+
+def landing_template_delete_confirm_keyboard(template_id: uuid.UUID) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Так, видалити",
+                    callback_data=f"adm:landing_del_yes:{template_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Ні, повернутися",
+                    callback_data=f"adm:landing:{template_id}",
+                )
+            ],
         ]
     )
 

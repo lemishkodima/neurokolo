@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal, InvalidOperation
 from html import escape
+from io import BytesIO
 from urllib.parse import urlparse
 
 from aiogram import Bot, F, Router
@@ -18,6 +19,9 @@ from club_bot.bot.admin_keyboards import (
     broadcast_confirm_keyboard,
     broadcast_menu,
     broadcast_target_keyboard,
+    landing_template_actions_keyboard,
+    landing_template_delete_confirm_keyboard,
+    landing_templates_keyboard,
     menu_content_keyboard,
     payment_test_confirm_keyboard,
     payments_keyboard,
@@ -30,13 +34,16 @@ from club_bot.bot.admin_keyboards import (
 from club_bot.bot.admin_states import (
     AdminAddStates,
     BroadcastCreateStates,
+    LandingTemplateCreateStates,
+    LandingTemplateEditStates,
     MenuContentStates,
     PlanCreateStates,
     PlanEditStates,
     SettingEditStates,
 )
+from club_bot.config import Settings
 from club_bot.domain.enums import BroadcastTarget
-from club_bot.models import Plan
+from club_bot.models import LandingTemplate, Plan
 from club_bot.services.admin import (
     AdminService,
     CatalogService,
@@ -44,6 +51,12 @@ from club_bot.services.admin import (
     SettingsService,
 )
 from club_bot.services.broadcasts import BroadcastService
+from club_bot.services.landing_templates import (
+    MAX_HTML_TEMPLATE_BYTES,
+    LandingTemplateError,
+    LandingTemplateNotFoundError,
+    LandingTemplateService,
+)
 from club_bot.services.stats import StatsService
 from club_bot.services.telegram_content import (
     TelegramContent,
@@ -81,6 +94,58 @@ def _plan_details(plan: Plan) -> str:
         f"Код: <code>{escape(plan.code)}</code>\n\n"
         "Оберіть, що потрібно змінити."
     )
+
+
+def _landing_details(template: LandingTemplate, public_url: str) -> str:
+    return (
+        f"<b>{escape(template.name)}</b>\n"
+        f"URL: <code>{escape(public_url)}</code>\n"
+        f"Заголовок: <b>{escape(template.landing_title)}</b>\n"
+        f"Канал: {escape(template.channel_title)}\n\n"
+        f"{escape(template.landing_description)}"
+    )
+
+
+async def _validated_landing_text(message: Message, field: str) -> str | None:
+    if not message.text:
+        await message.answer("Надішліть значення текстом.")
+        return None
+    try:
+        return LandingTemplateService.validate_field(field, message.text)
+    except LandingTemplateError as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return None
+
+
+async def _landing_html_from_message(message: Message, bot: Bot) -> str | None:
+    if message.document is not None:
+        file_name = message.document.file_name or ""
+        if not file_name.casefold().endswith((".html", ".htm")):
+            await message.answer("Надішліть документ із розширенням .html або .htm.")
+            return None
+        if (
+            message.document.file_size is not None
+            and message.document.file_size > MAX_HTML_TEMPLATE_BYTES
+        ):
+            await message.answer("HTML-файл перевищує 256 КБ.")
+            return None
+        destination = BytesIO()
+        await bot.download(message.document, destination=destination)
+        try:
+            value = destination.getvalue().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await message.answer("HTML-файл має бути збережений у кодуванні UTF-8.")
+            return None
+    elif message.text is not None:
+        value = message.text
+    else:
+        await message.answer("Надішліть HTML як текст або як документ .html.")
+        return None
+    try:
+        return LandingTemplateService.validate_html(value)
+    except LandingTemplateError as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return None
 
 
 @admin_router.message(Command("admin"))
@@ -458,6 +523,337 @@ async def show_resources(
         )
     if isinstance(callback.message, Message):
         await callback.message.edit_text("".join(lines), reply_markup=back_to_admin())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:landings")
+async def show_landing_templates(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    templates = await landing_template_service.list_templates()
+    text = (
+        "<b>HTML-сторінки вступу</b>\n\n"
+        "Кожна сторінка відкриває бота через персональний URL. Аватар завжди "
+        "завантажується з поточного профілю Telegram-бота."
+    )
+    if not templates:
+        text += "\n\nШаблонів поки немає."
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            text,
+            reply_markup=landing_templates_keyboard(templates),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "adm:landing_new")
+async def new_landing_template(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service):
+        return
+    await state.clear()
+    await state.set_state(LandingTemplateCreateStates.name)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Введіть внутрішню назву шаблону, наприклад <b>Instagram — липень</b>:"
+        )
+    await callback.answer()
+
+
+@admin_router.message(LandingTemplateCreateStates.name)
+async def landing_create_name(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    value = await _validated_landing_text(message, "name")
+    if value is None:
+        return
+    await state.update_data(landing_name=value)
+    await state.set_state(LandingTemplateCreateStates.slug)
+    await message.answer(
+        "Введіть slug для посилання, наприклад <code>instagram-july</code>.\n"
+        "Дозволені малі латинські літери, цифри й дефіси."
+    )
+
+
+@admin_router.message(LandingTemplateCreateStates.slug)
+async def landing_create_slug(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    value = await _validated_landing_text(message, "slug")
+    if value is None:
+        return
+    await state.update_data(landing_slug=value)
+    await state.set_state(LandingTemplateCreateStates.landing_title)
+    await message.answer("Введіть головний заголовок сторінки:")
+
+
+@admin_router.message(LandingTemplateCreateStates.landing_title)
+async def landing_create_title(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    value = await _validated_landing_text(message, "landing_title")
+    if value is None:
+        return
+    await state.update_data(landing_title=value)
+    await state.set_state(LandingTemplateCreateStates.channel_title)
+    await message.answer("Введіть назву каналу або проєкту:")
+
+
+@admin_router.message(LandingTemplateCreateStates.channel_title)
+async def landing_create_channel(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    value = await _validated_landing_text(message, "channel_title")
+    if value is None:
+        return
+    await state.update_data(channel_title=value)
+    await state.set_state(LandingTemplateCreateStates.landing_description)
+    await message.answer("Введіть короткий опис сторінки:")
+
+
+@admin_router.message(LandingTemplateCreateStates.landing_description)
+async def landing_create_description(
+    message: Message,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    value = await _validated_landing_text(message, "landing_description")
+    if value is None:
+        return
+    await state.update_data(landing_description=value)
+    await state.set_state(LandingTemplateCreateStates.html_template)
+    await message.answer(
+        "Надішліть повний HTML-шаблон як документ <code>.html</code> (рекомендовано) "
+        "або вставте його текстом.\n\n"
+        "Доступні плейсхолдери:\n"
+        "<code>{{landing_title}}</code>, <code>{{channel_title}}</code>, "
+        "<code>{{landing_description}}</code>, <code>{{avatar_url}}</code>, "
+        "<code>{{open_url}}</code>, <code>{{download_url}}</code>."
+    )
+
+
+@admin_router.message(LandingTemplateCreateStates.html_template)
+async def landing_create_html(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    html_template = await _landing_html_from_message(message, bot)
+    if html_template is None or message.from_user is None:
+        return
+    data = await state.get_data()
+    try:
+        template = await landing_template_service.create(
+            name=str(data["landing_name"]),
+            slug=str(data["landing_slug"]),
+            landing_title=str(data["landing_title"]),
+            channel_title=str(data["channel_title"]),
+            landing_description=str(data["landing_description"]),
+            html_template=html_template,
+            created_by_telegram_id=message.from_user.id,
+        )
+    except LandingTemplateError as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return
+    await state.clear()
+    public_url = f"{settings.landing_base_url}/join/{template.slug}"
+    await message.answer(
+        "✅ HTML-шаблон створено.\n\n" + _landing_details(template, public_url),
+        reply_markup=landing_template_actions_keyboard(template, public_url=public_url),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing:"))
+async def select_landing_template(
+    callback: CallbackQuery,
+    settings: Settings,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    template = await landing_template_service.get(uuid.UUID(callback.data.rsplit(":", 1)[1]))
+    if template is None:
+        await callback.answer("Шаблон не знайдено", show_alert=True)
+        return
+    public_url = f"{settings.landing_base_url}/join/{template.slug}"
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            _landing_details(template, public_url),
+            reply_markup=landing_template_actions_keyboard(template, public_url=public_url),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing_edit:"))
+async def edit_landing_template(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    _adm, _landing_edit, code, raw_template_id = callback.data.split(":")
+    template_id = uuid.UUID(raw_template_id)
+    template = await landing_template_service.get(template_id)
+    if template is None:
+        await callback.answer("Шаблон не знайдено", show_alert=True)
+        return
+    fields = {
+        "n": ("name", "внутрішню назву"),
+        "s": ("slug", "slug"),
+        "t": ("landing_title", "головний заголовок"),
+        "c": ("channel_title", "назву каналу"),
+        "d": ("landing_description", "опис"),
+        "u": ("download_url", "HTTPS-посилання для завантаження Telegram"),
+        "h": ("html_template", "HTML-шаблон"),
+    }
+    field, label = fields[code]
+    await state.clear()
+    await state.update_data(landing_template_id=str(template_id), landing_field=field)
+    await state.set_state(LandingTemplateEditStates.value)
+    if isinstance(callback.message, Message):
+        if field == "html_template":
+            prompt = (
+                "Надішліть новий HTML як документ <code>.html</code> або текстом. "
+                "Старий HTML буде замінено після успішної перевірки."
+            )
+        else:
+            current = escape(str(getattr(template, field)))
+            prompt = f"Поточне значення:\n<code>{current}</code>\n\nВведіть {label}:"
+        await callback.message.edit_text(prompt)
+    await callback.answer()
+
+
+@admin_router.message(LandingTemplateEditStates.value)
+async def save_landing_template_field(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service):
+        return
+    data = await state.get_data()
+    field = str(data["landing_field"])
+    if field == "html_template":
+        value = await _landing_html_from_message(message, bot)
+    else:
+        value = await _validated_landing_text(message, field)
+    if value is None:
+        return
+    try:
+        template = await landing_template_service.update_field(
+            uuid.UUID(str(data["landing_template_id"])),
+            field=field,
+            value=value,
+        )
+    except (LandingTemplateError, LandingTemplateNotFoundError) as error:
+        await message.answer(f"Помилка: {escape(str(error))}")
+        return
+    await state.clear()
+    public_url = f"{settings.landing_base_url}/join/{template.slug}"
+    await message.answer(
+        "✅ Шаблон оновлено.\n\n" + _landing_details(template, public_url),
+        reply_markup=landing_template_actions_keyboard(template, public_url=public_url),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing_html:"))
+async def download_landing_template_html(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    template = await landing_template_service.get(uuid.UUID(callback.data.rsplit(":", 1)[1]))
+    if template is None:
+        await callback.answer("Шаблон не знайдено", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.answer_document(
+            BufferedInputFile(
+                template.html_template.encode("utf-8"),
+                filename=f"{template.slug}.html",
+            ),
+            caption=f"HTML-шаблон «{escape(template.name)}»",
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing_delete:"))
+async def confirm_landing_template_delete(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    template_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    template = await landing_template_service.get(template_id)
+    if template is None:
+        await callback.answer("Шаблон не знайдено", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Видалити HTML-шаблон «{escape(template.name)}»?\n\n"
+            "Публічне посилання одразу перестане працювати.",
+            reply_markup=landing_template_delete_confirm_keyboard(template_id),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing_del_yes:"))
+async def delete_landing_template(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    removed = await landing_template_service.delete(
+        uuid.UUID(callback.data.rsplit(":", 1)[1])
+    )
+    templates = await landing_template_service.list_templates()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "✅ Шаблон видалено." if removed else "Шаблон не знайдено.",
+            reply_markup=landing_templates_keyboard(templates),
+        )
     await callback.answer()
 
 

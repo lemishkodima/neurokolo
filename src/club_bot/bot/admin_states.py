@@ -19,6 +19,19 @@ class SettingEditStates(StatesGroup):
     value = State()
 
 
+class LandingTemplateCreateStates(StatesGroup):
+    name = State()
+    slug = State()
+    landing_title = State()
+    channel_title = State()
+    landing_description = State()
+    html_template = State()
+
+
+class LandingTemplateEditStates(StatesGroup):
+    value = State()
+
+
 class MenuContentStates(StatesGroup):
     content = State()
     buttons = State()

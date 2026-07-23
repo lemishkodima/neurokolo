@@ -2,14 +2,27 @@ from __future__ import annotations
 
 import secrets
 import time
+from base64 import b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from html import escape
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from aiogram import Bot
 from aiogram.types import Update
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from fastapi import Path as ApiPath
 from fastapi.responses import HTMLResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.exposition import generate_latest
@@ -22,7 +35,12 @@ from club_bot.domain.enums import PaymentStatus
 from club_bot.integrations.wayforpay import InvalidWayForPaySignature
 from club_bot.models import Payment
 from club_bot.schemas import CheckoutCreate, CheckoutResponse
+from club_bot.services.landing_templates import LandingTemplateService
 from club_bot.services.subscriptions import PlanNotFoundError
+
+FALLBACK_BOT_AVATAR = (
+    Path(__file__).parent / "assets" / "prelanding-logo.svg"
+).read_bytes()
 
 
 def _checkout_response_headers(
@@ -57,6 +75,36 @@ def _gateway_form_inputs(fields: dict[str, Any]) -> str:
     return "\n".join(inputs)
 
 
+def _landing_response_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "public, max-age=60",
+        "Content-Security-Policy": (
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+            " script-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none';"
+            " object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+        ),
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+
+
+async def _bot_avatar(bot: Bot) -> tuple[bytes, str]:
+    try:
+        me = await bot.get_me()
+        photos = await bot.get_user_profile_photos(me.id, limit=1)
+        if not photos.photos:
+            return FALLBACK_BOT_AVATAR, "image/svg+xml"
+        destination = BytesIO()
+        await bot.download(photos.photos[0][-1], destination=destination)
+        content = destination.getvalue()
+        if content:
+            return content, "image/jpeg"
+    except Exception:
+        pass
+    return FALLBACK_BOT_AVATAR, "image/svg+xml"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings or get_settings()
     metrics_registry = CollectorRegistry()
@@ -77,6 +125,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "Approved provider payments without a linked subscription",
         registry=metrics_registry,
     )
+    avatar_cache: tuple[float, bytes, str] | None = None
+
+    async def cached_bot_avatar(container: Container) -> tuple[bytes, str]:
+        nonlocal avatar_cache
+        now = time.monotonic()
+        if avatar_cache is None or avatar_cache[0] <= now:
+            content, media_type = await _bot_avatar(container.bot)
+            avatar_cache = (now + 3600, content, media_type)
+        return avatar_cache[1], avatar_cache[2]
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -91,7 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.3.0-rc1", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.4.0-rc1", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -157,6 +214,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(
             content=generate_latest(metrics_registry),
             media_type=CONTENT_TYPE_LATEST,
+        )
+
+    @app.get("/join/{slug}", response_class=HTMLResponse, include_in_schema=False)
+    async def public_landing(
+        slug: str = ApiPath(
+            min_length=1,
+            max_length=56,
+            pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        ),
+        container: Container = Depends(container_from_request),
+    ) -> HTMLResponse:
+        template = await container.landing_template_service.get_by_slug(slug)
+        if template is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Landing not found")
+        avatar_content, avatar_media_type = await cached_bot_avatar(container)
+        avatar_url = (
+            f"data:{avatar_media_type};base64,"
+            f"{b64encode(avatar_content).decode('ascii')}"
+        )
+        open_url = (
+            f"https://t.me/{quote(container.settings.bot_username, safe='')}"
+            f"?start=landing_{quote(slug, safe='')}"
+        )
+        content = LandingTemplateService.render(
+            template,
+            avatar_url=avatar_url,
+            open_url=open_url,
+        )
+        return HTMLResponse(content=content, headers=_landing_response_headers())
+
+    @app.get("/landing-assets/bot-avatar", include_in_schema=False)
+    async def public_bot_avatar(
+        container: Container = Depends(container_from_request),
+    ) -> Response:
+        content, media_type = await cached_bot_avatar(container)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/webhooks/telegram", include_in_schema=False)

@@ -257,6 +257,23 @@ class AppSetting(TimestampMixin, Base):
     value: Mapped[str] = mapped_column(Text)
 
 
+class LandingTemplate(TimestampMixin, Base):
+    __tablename__ = "landing_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    landing_title: Mapped[str] = mapped_column(String(255))
+    channel_title: Mapped[str] = mapped_column(String(255))
+    landing_description: Mapped[str] = mapped_column(Text)
+    html_template: Mapped[str] = mapped_column(Text)
+    download_url: Mapped[str] = mapped_column(
+        String(2048),
+        default="https://telegram.org/apps",
+    )
+    created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+
+
 class Broadcast(TimestampMixin, Base):
     __tablename__ = "broadcasts"
     __table_args__ = (Index("ix_broadcasts_queue", "status", "scheduled_at"),)

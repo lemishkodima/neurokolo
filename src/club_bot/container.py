@@ -22,6 +22,7 @@ from club_bot.integrations.wayforpay import (
 from club_bot.services.access import AccessService
 from club_bot.services.admin import AdminService, CatalogService, SettingsService
 from club_bot.services.broadcasts import BroadcastService
+from club_bot.services.landing_templates import LandingTemplateService
 from club_bot.services.stats import StatsService
 from club_bot.services.subscription_notifications import SubscriptionNotificationService
 from club_bot.services.subscriptions import SubscriptionService
@@ -44,6 +45,7 @@ class Container:
     catalog_service: CatalogService
     settings_service: SettingsService
     broadcast_service: BroadcastService
+    landing_template_service: LandingTemplateService
     stats_service: StatsService
     subscription_notification_service: SubscriptionNotificationService
 
@@ -57,6 +59,7 @@ class Container:
             "catalog_service": self.catalog_service,
             "settings_service": self.settings_service,
             "broadcast_service": self.broadcast_service,
+            "landing_template_service": self.landing_template_service,
             "stats_service": self.stats_service,
             "subscription_notification_service": self.subscription_notification_service,
         }
@@ -123,6 +126,7 @@ def build_container(settings: Settings) -> Container:
         bot,
         batch_size=settings.broadcast_batch_size,
     )
+    landing_template_service = LandingTemplateService(session_factory)
     stats_service = StatsService(session_factory)
     subscription_notification_service = SubscriptionNotificationService(
         bot,
@@ -144,6 +148,7 @@ def build_container(settings: Settings) -> Container:
         catalog_service=catalog_service,
         settings_service=settings_service,
         broadcast_service=broadcast_service,
+        landing_template_service=landing_template_service,
         stats_service=stats_service,
         subscription_notification_service=subscription_notification_service,
     )

@@ -108,6 +108,7 @@ The panel supports:
 - assigning a formatted post, photo/video, media album, and optional URL buttons to each main
   user-menu action;
 - enabling isolated WayForPay test checkout for 30 minutes from the admin panel;
+- creating, previewing, editing, downloading, and deleting branded HTML entry pages;
 - adding and revoking additional administrator IDs.
 
 For Telegram access management, add the bot as an administrator to every private channel and
@@ -138,6 +139,33 @@ share the public checkout link while the global test window is active.
 
 WayForPay documents its integration test merchant separately from production credentials:
 https://wiki.wayforpay.com/en/view/852472
+
+### HTML entry pages
+
+Open `/admin` → `🌐 HTML-вступ` to create a public prelanding page. The wizard asks for an
+internal name, URL slug, title, channel name, description, and a UTF-8 `.html` document. The
+result is available at `https://<membership-domain>/join/<slug>`.
+
+Templates can use these placeholders:
+
+```text
+{{landing_title}}
+{{channel_title}}
+{{landing_description}}
+{{avatar_url}}
+{{open_url}}
+{{download_url}}
+```
+
+`avatar_url` contains the current Telegram bot profile photo fetched server-side and cached for
+one hour; the bot token is never exposed to the browser. `open_url` is generated as a Telegram
+deep link for the current bot. Template values are HTML-escaped. Templates may contain HTML and
+inline CSS, but executable scripts, forms, iframes, event-handler attributes, and unknown
+placeholders are rejected. A restrictive response Content Security Policy is also applied.
+
+The admin page for each template supports public preview, editing every metadata field, replacing
+or downloading the HTML file, and permanent deletion. Deleting a template immediately makes its
+public URL return 404.
 
 ## CLI configuration (alternative)
 

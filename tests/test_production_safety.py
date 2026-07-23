@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from club_bot.api import create_app
 from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
-from club_bot.models import Base
+from club_bot.models import Base, LandingTemplate
 from club_bot.schemas import CheckoutResponse
 
 
@@ -153,3 +153,75 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         in completion_page.text
     )
     assert completion_page.headers["cache-control"] == "no-store"
+
+
+async def test_public_landing_renders_safe_values_and_proxies_bot_avatar() -> None:
+    settings = Settings(**settings_values())
+    template = LandingTemplate(
+        name="Campaign",
+        slug="campaign",
+        landing_title="<Neurokolo>",
+        channel_title="Club",
+        landing_description="Daily & useful",
+        html_template=(
+            "<!doctype html><html><body><h1>{{landing_title}}</h1>"
+            '<img src="{{avatar_url}}" alt="{{channel_title}}">'
+            "<p>{{landing_description}}</p>"
+            '<a href="{{open_url}}">Open</a>'
+            '<a href="{{download_url}}">Download</a></body></html>'
+        ),
+        download_url="https://telegram.org/apps",
+        created_by_telegram_id=402152266,
+    )
+
+    class FakeBot:
+        async def get_me(self) -> SimpleNamespace:
+            return SimpleNamespace(id=123)
+
+        async def get_user_profile_photos(
+            self, _user_id: int, *, limit: int
+        ) -> SimpleNamespace:
+            assert limit == 1
+            return SimpleNamespace(photos=[[SimpleNamespace(file_id="safe-file-id")]])
+
+        async def download(self, _photo: object, *, destination: object) -> None:
+            destination.write(b"jpeg-avatar")  # type: ignore[attr-defined]
+
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        settings=settings,
+        landing_template_service=SimpleNamespace(
+            get_by_slug=AsyncMock(return_value=template)
+        ),
+        bot=FakeBot(),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        landing = await client.get("/join/campaign")
+        avatar = await client.get("/landing-assets/bot-avatar")
+
+    assert landing.status_code == 200
+    assert "&lt;Neurokolo&gt;" in landing.text
+    assert "Daily &amp; useful" in landing.text
+    assert "data:image/jpeg;base64,anBlZy1hdmF0YXI=" in landing.text
+    assert "https://t.me/club_bot?start=landing_campaign" in landing.text
+    assert "script-src 'none'" in landing.headers["content-security-policy"]
+    assert avatar.status_code == 200
+    assert avatar.content == b"jpeg-avatar"
+    assert avatar.headers["content-type"].startswith("image/jpeg")
+
+
+async def test_public_landing_returns_not_found_for_unknown_slug() -> None:
+    settings = Settings(**settings_values())
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        settings=settings,
+        landing_template_service=SimpleNamespace(
+            get_by_slug=AsyncMock(return_value=None)
+        ),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/join/missing")
+    assert response.status_code == 404

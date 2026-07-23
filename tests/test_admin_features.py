@@ -14,7 +14,14 @@ from club_bot.bot.admin_router import _parse_buttons
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import BroadcastStatus, BroadcastTarget, DeliveryStatus, ResourceType
-from club_bot.models import Base, Broadcast, BroadcastRecipient, Plan, TelegramResource, User
+from club_bot.models import (
+    Base,
+    Broadcast,
+    BroadcastRecipient,
+    Plan,
+    TelegramResource,
+    User,
+)
 from club_bot.services.admin import (
     AdminService,
     CatalogService,
@@ -22,6 +29,7 @@ from club_bot.services.admin import (
     SettingsService,
 )
 from club_bot.services.broadcasts import BroadcastService
+from club_bot.services.landing_templates import LandingTemplateError, LandingTemplateService
 from club_bot.services.stats import StatsService
 from club_bot.services.telegram_content import TelegramContent
 
@@ -121,6 +129,55 @@ async def test_plan_edit_archive_restore_and_default_protection(tmp_path: Path) 
 
     async with session_factory() as session:
         assert await session.get(Plan, second_plan.id) is not None
+
+
+async def test_landing_template_crud_validation_and_safe_rendering(tmp_path: Path) -> None:
+    session_factory = await _database(tmp_path)
+    service = LandingTemplateService(session_factory)
+    html = """<!doctype html>
+<html><body>
+<h1>{{landing_title}}</h1>
+<img src="{{avatar_url}}" alt="{{channel_title}}">
+<p>{{landing_description}}</p>
+<a href="{{open_url}}">Telegram</a>
+<a href="{{download_url}}">Download</a>
+</body></html>"""
+    template = await service.create(
+        name="Instagram",
+        slug="instagram-july",
+        landing_title="Neurokolo",
+        channel_title="Club",
+        landing_description="Daily lessons",
+        html_template=html,
+        created_by_telegram_id=402152266,
+    )
+
+    assert [item.id for item in await service.list_templates()] == [template.id]
+    assert (await service.get_by_slug("instagram-july")).id == template.id  # type: ignore[union-attr]
+
+    updated = await service.update_field(
+        template.id,
+        field="landing_title",
+        value='New <title> "today"',
+    )
+    rendered = service.render(
+        updated,
+        avatar_url="data:image/jpeg;base64,YXZhdGFy",
+        open_url="https://t.me/club_bot?start=landing_instagram-july",
+    )
+    assert "New &lt;title&gt; &quot;today&quot;" in rendered
+    assert "data:image/jpeg;base64,YXZhdGFy" in rendered
+    assert "{{" not in rendered
+
+    with pytest.raises(LandingTemplateError):
+        service.validate_html("<html><script>alert(1)</script>{{open_url}}</html>")
+    with pytest.raises(LandingTemplateError):
+        service.validate_html("<html><a href='{{unknown_url}}'>Open</a></html>")
+    with pytest.raises(LandingTemplateError):
+        service.validate_html("<html><p>No Telegram link</p></html>")
+
+    assert await service.delete(template.id) is True
+    assert await service.get(template.id) is None
 
 
 async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:
