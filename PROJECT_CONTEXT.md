@@ -92,9 +92,10 @@ WayForPay callback завжди потребує публічної адреси
 
 ## Платіжний сценарій
 
-1. Сайт або його backend створює checkout:
+1. Вбудований публічний маршрут `GET /checkout` створює checkout server-side,
+   не розкриваючи внутрішній API key. Альтернативно backend окремого сайту викликає
    `POST /api/v1/checkout-sessions`.
-2. Запит захищається заголовком `X-Internal-API-Key`.
+2. Внутрішній endpoint захищається заголовком `X-Internal-API-Key`.
 3. API повертає `gateway_url`, підписані `gateway_fields`,
    `bot_claim_url` і `order_reference`.
 4. Форма відправляється на платіжну сторінку WayForPay.
@@ -104,6 +105,7 @@ WayForPay callback завжди потребує публічної адреси
 8. Якщо платіж ще не прив'язаний до Telegram-користувача, `bot_claim_url`
    завершує прив'язку.
 9. Після успішної прив'язки бот надсилає підтвердження та invite-кнопки.
+10. `GET /checkout/complete` повертає користувача до персонального Telegram claim URL.
 
 WayForPay API adapter:
 `src/club_bot/integrations/wayforpay.py`.
@@ -245,6 +247,8 @@ NEUROKOLO_VENV=/Users/mac/Library/Caches/neurokolo/venv
 - Prometheus збирає API-метрики й контролює unmatched approved payments.
 - Python-залежності й базові Docker images зафіксовані lock/hash/digest.
 - Production-конфігурація fail-fast відхиляє placeholder-домени та dev credentials.
+- Вбудований checkout рендерить підписану WayForPay-форму server-side та повертає
+  користувача до персонального Telegram claim URL.
 
 ## Найближчі кроки
 

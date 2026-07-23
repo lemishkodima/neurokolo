@@ -143,6 +143,18 @@ created with different codes and linked to any desired resource set.
 
 ## Website checkout integration
 
+For the built-in public checkout, direct the club button to:
+
+```text
+https://api.example.com/checkout
+```
+
+The endpoint creates a checkout server-side and renders a form that posts the signed
+fields directly to WayForPay. After payment, `/checkout/complete` provides the
+personal Telegram claim link. `INTERNAL_API_KEY` is never exposed to the browser.
+
+For a separate website frontend, its backend can instead call:
+
 The website backend calls:
 
 ```http

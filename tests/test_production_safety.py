@@ -1,4 +1,6 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -8,6 +10,7 @@ from club_bot.api import create_app
 from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
 from club_bot.models import Base
+from club_bot.schemas import CheckoutResponse
 
 
 def settings_values() -> dict[str, object]:
@@ -79,3 +82,64 @@ async def test_health_readiness_and_metrics_endpoints() -> None:
         assert "neurokolo_http_requests_total" in metrics.text
     finally:
         await engine.dispose()
+
+
+async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -> None:
+    settings = Settings(**settings_values())
+    checkout = CheckoutResponse(
+        checkout_token="checkout_token_abcdefghijklmnopqrstuvwxyz",
+        order_reference="CLUB-20260723-reference",
+        bot_claim_url="https://t.me/club_bot?start=claim_checkout_token_abcdefghijklmnopqrstuvwxyz",
+        gateway_url="https://secure.example.test/pay",
+        gateway_fields={
+            "merchantAccount": "merchant",
+            "merchantSignature": "signature",
+            "amount": "990.00",
+            "currency": "UAH",
+            "productName": ["Club access"],
+            "productCount": [1],
+            "productPrice": ["990.00"],
+            "returnUrl": "https://example.test/club",
+        },
+        expires_at=datetime.now(UTC),
+    )
+    create_checkout = AsyncMock(return_value=checkout)
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        settings=settings,
+        subscription_service=SimpleNamespace(create_checkout=create_checkout),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        payment_page = await client.get("/checkout", params={"referral_code": "friend"})
+        completion_page = await client.get(
+            "/checkout/complete",
+            params={"token": checkout.checkout_token},
+        )
+
+    assert payment_page.status_code == 200
+    assert 'action="https://secure.example.test/pay"' in payment_page.text
+    assert 'name="productName[]"' in payment_page.text
+    assert "990.00 UAH" in payment_page.text
+    assert (
+        "https://api.example.test/checkout/complete"
+        f"?token={checkout.checkout_token}" in payment_page.text
+    )
+    assert "form-action https://secure.example.test" in payment_page.headers[
+        "content-security-policy"
+    ]
+    create_checkout.assert_awaited_once_with(
+        plan_code=settings.default_plan_code,
+        email=None,
+        phone=None,
+        referral_code="friend",
+        return_url=None,
+    )
+
+    assert completion_page.status_code == 200
+    assert (
+        f"https://t.me/{settings.bot_username}?start=claim_{checkout.checkout_token}"
+        in completion_page.text
+    )
+    assert completion_page.headers["cache-control"] == "no-store"
