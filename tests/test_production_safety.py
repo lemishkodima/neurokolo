@@ -123,6 +123,8 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
     assert 'action="https://secure.example.test/pay"' in payment_page.text
     assert 'id="wayforpay-checkout"' in payment_page.text
     assert 'document.getElementById("wayforpay-checkout").submit();' in payment_page.text
+    assert "body { visibility: hidden;" in payment_page.text
+    assert "<noscript><style>body { visibility: visible; }</style></noscript>" in payment_page.text
     assert 'name="productName[]"' in payment_page.text
     assert "990.00 UAH" in payment_page.text
     assert (

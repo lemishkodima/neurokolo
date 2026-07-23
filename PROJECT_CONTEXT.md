@@ -98,8 +98,8 @@ WayForPay callback завжди потребує публічної адреси
 2. Внутрішній endpoint захищається заголовком `X-Internal-API-Key`.
 3. API повертає `gateway_url`, підписані `gateway_fields`,
    `bot_claim_url` і `order_reference`.
-4. Підписана форма автоматично відправляється на платіжну сторінку WayForPay;
-   видима кнопка залишається fallback для браузерів без JavaScript.
+4. Підписана форма невидимо й автоматично відправляється на платіжну сторінку
+   WayForPay; видима кнопка залишається fallback для браузерів без JavaScript.
 5. WayForPay викликає `POST /webhooks/wayforpay`.
 6. Callback приймається тільки після перевірки HMAC-MD5.
 7. Approved-платіж активує/продовжує підписку.

@@ -91,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.2.0-rc5", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.2.0-rc6", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -263,8 +263,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Оплата підписки Neurokolo</title>
   <style>
-    :root {{ color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+    :root {{ color-scheme: dark; font-family: system-ui, -apple-system, sans-serif;
+      background: #0d1517; }}
+    body {{ visibility: hidden; margin: 0; min-height: 100vh; display: grid; place-items: center;
       background: #0d1517; color: #f4f7f8; }}
     main {{ width: min(32rem, calc(100% - 3rem)); padding: 2.5rem;
       border: 1px solid #29464d; border-radius: 1.5rem; background: #142126; }}
@@ -274,6 +275,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
       font: inherit; font-weight: 700; cursor: pointer; }}
     small {{ display: block; margin-top: 1rem; color: #789096; }}
   </style>
+  <noscript><style>body {{ visibility: visible; }}</style></noscript>
 </head>
 <body>
   <main>

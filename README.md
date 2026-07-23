@@ -151,7 +151,8 @@ https://api.example.com/checkout
 
 The endpoint creates a checkout server-side and automatically posts the signed form
 to WayForPay, so the Telegram button reaches the provider checkout in one click.
-A visible submit button remains as a fallback when JavaScript is unavailable.
+The technical form stays hidden during the automatic transition; a visible submit
+button remains as a fallback when JavaScript is unavailable.
 After payment, `/checkout/complete` provides the personal Telegram claim link.
 `INTERNAL_API_KEY` is never exposed to the browser.
 
