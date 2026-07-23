@@ -6,15 +6,17 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.types import User as TelegramUser
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.bot.admin_router import _parse_buttons
-from club_bot.bot.routers import start
+from club_bot.bot.routers import join, start
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import (
@@ -43,6 +45,7 @@ from club_bot.services.admin import (
     SettingsService,
 )
 from club_bot.services.broadcasts import BroadcastService
+from club_bot.services.checkout_links import verify_personal_checkout_token
 from club_bot.services.landing_templates import LandingTemplateError, LandingTemplateService
 from club_bot.services.stats import StatsService
 from club_bot.services.telegram_content import TelegramContent
@@ -304,6 +307,40 @@ async def test_start_records_landing_source() -> None:
     )
     assert landing_service.recorded == [(user_id, "instagram-july")]
     assert message.answers == ["Welcome"]
+
+
+async def test_join_button_contains_signed_personal_checkout_owner() -> None:
+    class FakeSettingsService:
+        async def menu_content(self, _action: str) -> None:
+            return None
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = TelegramUser(id=501, is_bot=False, first_name="Member")
+            self.chat = SimpleNamespace(id=501)
+            self.reply_markup: object | None = None
+
+        async def answer(self, _text: str, *, reply_markup: object) -> None:
+            self.reply_markup = reply_markup
+
+    settings = SimpleNamespace(
+        membership_site_url="https://neurokolo.com/club",
+        internal_api_key=SecretStr("internal-secret"),
+    )
+    message = FakeMessage()
+
+    await join(
+        message,  # type: ignore[arg-type]
+        settings,  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert message.reply_markup is not None
+    button_url = message.reply_markup.inline_keyboard[0][0].url  # type: ignore[union-attr]
+    assert button_url is not None
+    owner_token = parse_qs(urlsplit(button_url).query)["owner"][0]
+    assert verify_personal_checkout_token(owner_token, "internal-secret") == 501
 
 
 async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:

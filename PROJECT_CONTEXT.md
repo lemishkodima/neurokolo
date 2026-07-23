@@ -99,9 +99,10 @@ WayForPay callback завжди потребує публічної адреси
 
 ## Платіжний сценарій
 
-1. Вбудований публічний маршрут `GET /checkout` створює checkout server-side,
-   не розкриваючи внутрішній API key. Альтернативно backend окремого сайту викликає
-   `POST /api/v1/checkout-sessions`.
+1. Кнопка оплати в боті містить короткоживучий HMAC-підписаний owner token.
+   `GET /checkout` перевіряє його server-side та створює checkout, уже прив'язаний
+   до Telegram-користувача, не розкриваючи внутрішній API key. Альтернативно backend
+   окремого сайту викликає `POST /api/v1/checkout-sessions`.
 2. Внутрішній endpoint захищається заголовком `X-Internal-API-Key`.
 3. API повертає `gateway_url`, підписані `gateway_fields`,
    `bot_claim_url` і `order_reference`.
@@ -110,11 +111,10 @@ WayForPay callback завжди потребує публічної адреси
 5. WayForPay викликає `POST /webhooks/wayforpay`.
 6. Callback приймається тільки після перевірки HMAC-MD5.
 7. Approved-платіж активує/продовжує підписку.
-8. Якщо платіж ще не прив'язаний до Telegram-користувача, `bot_claim_url`
-   завершує прив'язку.
-9. Після успішної прив'язки бот надсилає підтвердження та invite-кнопки.
-10. `GET` або provider `POST` на `/checkout/complete` повертає користувача до
-    персонального Telegram claim URL.
+8. Для персонального checkout підписка активується одразу в callback, а бот
+   автоматично надсилає підтвердження та персональні invite-кнопки.
+9. `GET` або provider `POST` на `/checkout/complete` є інформаційним і не видає
+   доступ. Для анонімного checkout `bot_claim_url` залишається fallback-прив'язкою.
 
 Тестовий режим WayForPay:
 

@@ -19,6 +19,10 @@ from club_bot.config import Settings
 from club_bot.integrations.wayforpay import WayForPayError
 from club_bot.services.access import AccessDeniedError, AccessService
 from club_bot.services.admin import SettingsService
+from club_bot.services.checkout_links import (
+    add_query_parameter,
+    create_personal_checkout_token,
+)
 from club_bot.services.landing_templates import LandingTemplateService
 from club_bot.services.subscription_notifications import SubscriptionNotificationService
 from club_bot.services.subscriptions import (
@@ -99,10 +103,22 @@ async def join(
     settings_service: SettingsService,
     bot: Bot,
 ) -> None:
+    if message.from_user is None:
+        return
     await _send_configured_content(message, "join", settings_service, bot)
+    owner_token = create_personal_checkout_token(
+        message.from_user.id,
+        settings.internal_api_key.get_secret_value(),
+    )
+    checkout_url = add_query_parameter(
+        settings.membership_site_url,
+        "owner",
+        owner_token,
+    )
     await message.answer(
-        "Оформіть підписку на клуб на сайті. Після оплати сайт поверне вас у бот.",
-        reply_markup=website_button(settings.membership_site_url),
+        "Оформіть підписку на клуб. Після підтвердження WayForPay бот автоматично "
+        "надішле повідомлення й персональні посилання доступу.",
+        reply_markup=website_button(checkout_url),
     )
 
 

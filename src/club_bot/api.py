@@ -35,8 +35,12 @@ from club_bot.domain.enums import PaymentStatus
 from club_bot.integrations.wayforpay import InvalidWayForPaySignature
 from club_bot.models import Payment
 from club_bot.schemas import CheckoutCreate, CheckoutResponse
+from club_bot.services.checkout_links import (
+    InvalidPersonalCheckoutToken,
+    verify_personal_checkout_token,
+)
 from club_bot.services.landing_templates import LandingTemplateService
-from club_bot.services.subscriptions import PlanNotFoundError
+from club_bot.services.subscriptions import CheckoutOwnerNotFoundError, PlanNotFoundError
 
 FALLBACK_BOT_AVATAR = (
     Path(__file__).parent / "assets" / "prelanding-logo.svg"
@@ -148,7 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.5.0-rc1", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.6.0-rc1", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -328,8 +332,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/checkout", response_class=HTMLResponse, include_in_schema=False)
     async def public_checkout(
         referral_code: str | None = Query(default=None, max_length=32),
+        owner: str | None = Query(
+            default=None,
+            min_length=20,
+            max_length=240,
+            pattern=r"^[A-Za-z0-9._-]+$",
+        ),
         container: Container = Depends(container_from_request),
     ) -> HTMLResponse:
+        telegram_id = None
+        if owner is not None:
+            try:
+                telegram_id = verify_personal_checkout_token(
+                    owner,
+                    container.settings.internal_api_key.get_secret_value(),
+                )
+            except InvalidPersonalCheckoutToken as error:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Personal checkout link is invalid or expired",
+                ) from error
         try:
             test_mode = await container.settings_service.payment_test_mode_active()
             checkout = await container.subscription_service.create_checkout(
@@ -339,11 +361,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 referral_code=referral_code,
                 return_url=None,
                 test_mode=test_mode,
+                telegram_id=telegram_id,
             )
         except PlanNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Payment plan is unavailable",
+            ) from error
+        except CheckoutOwnerNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Telegram account must start the bot before checkout",
             ) from error
 
         complete_url = (
@@ -417,11 +445,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token: str = Query(min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_-]+$"),
         container: Container = Depends(container_from_request),
     ) -> HTMLResponse:
-        claim_url = (
-            f"https://t.me/{quote(container.settings.bot_username, safe='')}"
-            f"?start=claim_{quote(token, safe='')}"
+        telegram_id = (
+            await container.subscription_service.checkout_owner_telegram_id_by_token(token)
         )
-        escaped_claim_url = escape(claim_url, quote=True)
+        bot_url = f"https://t.me/{quote(container.settings.bot_username, safe='')}"
+        if telegram_id is not None:
+            title = "Оплату передано на перевірку"
+            message = (
+                "Після підписаного підтвердження WayForPay бот автоматично активує "
+                "підписку та надішле персональні посилання доступу. Додаткове "
+                "підтвердження в боті не потрібне."
+            )
+            button = "Відкрити бота"
+            destination_url = bot_url
+        else:
+            title = "Завершіть активацію"
+            message = "Поверніться до Telegram-бота, щоб прив’язати оплату та отримати доступ."
+            button = "Повернутися до бота"
+            destination_url = f"{bot_url}?start=claim_{quote(token, safe='')}"
+        escaped_destination_url = escape(destination_url, quote=True)
         body = f"""<!doctype html>
 <html lang="uk">
 <head>
@@ -442,9 +484,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 </head>
 <body>
   <main>
-    <h1>Завершіть активацію</h1>
-    <p>Поверніться до Telegram-бота, щоб прив’язати оплату та отримати доступ.</p>
-    <a href="{escaped_claim_url}">Повернутися до бота</a>
+    <h1>{title}</h1>
+    <p>{message}</p>
+    <a href="{escaped_destination_url}">{button}</a>
   </main>
 </body>
 </html>"""

@@ -213,8 +213,14 @@ The endpoint creates a checkout server-side and automatically posts the signed f
 to WayForPay, so the Telegram button reaches the provider checkout in one click.
 The technical form stays hidden during the automatic transition; a visible submit
 button remains as a fallback when JavaScript is unavailable.
-After payment, `GET` or provider `POST` to `/checkout/complete` provides the personal Telegram
-claim link.
+When checkout is opened from the bot, the button contains a short-lived HMAC-signed owner token.
+The API validates it server-side and creates the checkout already bound to that Telegram user.
+After a verified `approved` WayForPay callback, the subscription is activated and the bot
+immediately sends the configured success message with personal invite links. The
+`/checkout/complete` page is informational in this flow; no manual claim is required.
+
+Anonymous website checkout remains supported. For that fallback flow, `GET` or provider `POST`
+to `/checkout/complete` provides the personal Telegram claim link.
 `INTERNAL_API_KEY` is never exposed to the browser.
 
 For a separate website frontend, its backend can instead call:

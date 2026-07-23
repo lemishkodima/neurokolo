@@ -188,6 +188,71 @@ async def test_paid_checkout_claim_and_idempotency(
         assert stored_checkout.status == CheckoutStatus.CLAIMED
 
 
+async def test_personal_checkout_activates_without_manual_claim(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    user_service, subscriptions, wayforpay = services
+    async with session_factory() as session, session.begin():
+        session.add(Plan(code="base", name="Base", price=990, currency="UAH"))
+    telegram_user = TelegramUser(id=501, is_bot=False, first_name="Personal")
+    await user_service.upsert_telegram_user(telegram_user)
+
+    checkout = await subscriptions.create_checkout(
+        plan_code="base",
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+        telegram_id=telegram_user.id,
+    )
+    assert await subscriptions.checkout_owner_telegram_id_by_token(
+        checkout.checkout_token
+    ) == telegram_user.id
+    callback = {
+        "merchantAccount": "merchant",
+        "orderReference": checkout.order_reference,
+        "amount": "990.00",
+        "currency": "UAH",
+        "authCode": "personal",
+        "cardPan": "42****42",
+        "transactionStatus": "Approved",
+        "reasonCode": 1100,
+        "processingDate": 1_700_000_000,
+        "recToken": "personal-rec-token",
+    }
+    callback["merchantSignature"] = wayforpay._sign(
+        [
+            callback[key]
+            for key in (
+                "merchantAccount",
+                "orderReference",
+                "amount",
+                "currency",
+                "authCode",
+                "cardPan",
+                "transactionStatus",
+                "reasonCode",
+            )
+        ]
+    )
+
+    assert await subscriptions.is_initial_checkout_callback(checkout.order_reference) is True
+    assert await subscriptions.process_callback(callback) is True
+    assert await subscriptions.checkout_owner_telegram_id(checkout.order_reference) == 501
+    subscription = await subscriptions.current_for_telegram_user(501)
+    assert subscription is not None
+    assert subscription.status == SubscriptionStatus.ACTIVE.value
+
+    async with session_factory() as session:
+        stored_checkout = await session.scalar(
+            select(CheckoutSession).where(CheckoutSession.public_token == checkout.checkout_token)
+        )
+        assert stored_checkout is not None
+        assert stored_checkout.status == CheckoutStatus.CLAIMED
+
+
 async def test_approved_callback_with_wrong_payment_terms_does_not_activate(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     services: tuple[UserService, SubscriptionService, WayForPayClient],

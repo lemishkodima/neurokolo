@@ -1,7 +1,7 @@
 import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -12,6 +12,7 @@ from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
 from club_bot.models import Base, LandingTemplate
 from club_bot.schemas import CheckoutResponse
+from club_bot.services.checkout_links import create_personal_checkout_token
 
 
 def settings_values() -> dict[str, object]:
@@ -108,7 +109,10 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
     app = create_app(settings)
     app.state.container = SimpleNamespace(
         settings=settings,
-        subscription_service=SimpleNamespace(create_checkout=create_checkout),
+        subscription_service=SimpleNamespace(
+            create_checkout=create_checkout,
+            checkout_owner_telegram_id_by_token=AsyncMock(return_value=None),
+        ),
         settings_service=SimpleNamespace(payment_test_mode_active=AsyncMock(return_value=False)),
     )
     transport = httpx.ASGITransport(app=app)
@@ -149,6 +153,7 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         referral_code="friend",
         return_url=None,
         test_mode=False,
+        telegram_id=None,
     )
 
     assert completion_page.status_code == 200
@@ -163,6 +168,99 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         in completion_post_page.text
     )
     assert completion_post_page.headers["cache-control"] == "no-store"
+
+
+async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> None:
+    settings = Settings(**settings_values())
+    checkout = CheckoutResponse(
+        checkout_token="personal_checkout_token_abcdefghijklmnopqrstuvwxyz",
+        order_reference="CLUB-20260724-personal",
+        bot_claim_url="https://t.me/club_bot?start=claim_personal_checkout_token",
+        gateway_url="https://secure.example.test/pay",
+        gateway_fields={
+            "merchantAccount": "merchant",
+            "merchantSignature": "signature",
+            "amount": "990.00",
+            "currency": "UAH",
+        },
+        expires_at=datetime.now(UTC),
+    )
+    create_checkout = AsyncMock(return_value=checkout)
+    owner_lookup = AsyncMock(return_value=501)
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        settings=settings,
+        subscription_service=SimpleNamespace(
+            create_checkout=create_checkout,
+            checkout_owner_telegram_id_by_token=owner_lookup,
+        ),
+        settings_service=SimpleNamespace(payment_test_mode_active=AsyncMock(return_value=False)),
+    )
+    transport = httpx.ASGITransport(app=app)
+    owner_token = create_personal_checkout_token(
+        501,
+        settings.internal_api_key.get_secret_value(),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        payment_page = await client.get("/checkout", params={"owner": owner_token})
+        completion_page = await client.post(
+            "/checkout/complete",
+            params={"token": checkout.checkout_token},
+        )
+        tampered_page = await client.get(
+            "/checkout",
+            params={"owner": f"{owner_token[:-1]}x"},
+        )
+
+    assert payment_page.status_code == 200
+    create_checkout.assert_awaited_once_with(
+        plan_code=settings.default_plan_code,
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+        test_mode=False,
+        telegram_id=501,
+    )
+    owner_lookup.assert_awaited_once_with(checkout.checkout_token)
+    assert completion_page.status_code == 200
+    assert "Додаткове підтвердження в боті не потрібне" in completion_page.text
+    assert "Відкрити бота" in completion_page.text
+    assert "start=claim_" not in completion_page.text
+    assert tampered_page.status_code == 400
+
+
+async def test_approved_personal_checkout_callback_sends_activation_once() -> None:
+    settings = Settings(**settings_values())
+    subscription_service = SimpleNamespace(
+        verify_callback=Mock(),
+        is_initial_checkout_callback=AsyncMock(return_value=True),
+        process_callback=AsyncMock(side_effect=[True, False]),
+        checkout_owner_telegram_id=AsyncMock(return_value=501),
+        callback_response=Mock(
+            return_value={"orderReference": "CLUB-personal", "status": "accept"}
+        ),
+    )
+    send_activated = AsyncMock(return_value=True)
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        subscription_service=subscription_service,
+        subscription_notification_service=SimpleNamespace(send_activated=send_activated),
+    )
+    transport = httpx.ASGITransport(app=app)
+    callback = {
+        "orderReference": "CLUB-personal",
+        "transactionStatus": "Approved",
+    }
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/webhooks/wayforpay", json=callback)
+        duplicate = await client.post("/webhooks/wayforpay", json=callback)
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    send_activated.assert_awaited_once_with(501)
 
 
 async def test_public_landing_renders_safe_values_and_proxies_bot_avatar() -> None:

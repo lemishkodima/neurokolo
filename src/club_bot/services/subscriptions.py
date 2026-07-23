@@ -44,6 +44,10 @@ class CheckoutExpiredError(RuntimeError):
     pass
 
 
+class CheckoutOwnerNotFoundError(LookupError):
+    pass
+
+
 @dataclass(frozen=True)
 class ClaimResult:
     paid: bool
@@ -77,6 +81,7 @@ class SubscriptionService:
         referral_code: str | None,
         return_url: str | None,
         test_mode: bool = False,
+        telegram_id: int | None = None,
     ) -> CheckoutResponse:
         now = utc_now()
         provider = self.test_wayforpay if test_mode else self.wayforpay
@@ -84,6 +89,11 @@ class SubscriptionService:
             plan = await PlanRepository(session).by_code(plan_code)
             if plan is None:
                 raise PlanNotFoundError(plan_code)
+            user = None
+            if telegram_id is not None:
+                user = await UserRepository(session).by_telegram_id(telegram_id)
+                if user is None:
+                    raise CheckoutOwnerNotFoundError(telegram_id)
             token = generate_public_token()
             prefix = "TEST" if test_mode else "CLUB"
             order_reference = f"{prefix}-{now:%Y%m%d}-{token[:12]}"
@@ -91,6 +101,7 @@ class SubscriptionService:
                 public_token=token,
                 order_reference=order_reference,
                 plan_id=plan.id,
+                user_id=user.id if user is not None else None,
                 referrer_code=referral_code,
                 email=email,
                 phone=phone,
@@ -99,6 +110,8 @@ class SubscriptionService:
                 expires_at=now + timedelta(hours=24),
             )
             session.add(checkout)
+            if user is not None:
+                await self._attach_referrer_from_checkout(session, user, referral_code)
 
             fields = provider.build_purchase_payload(
                 order_reference=order_reference,
@@ -240,6 +253,15 @@ class SubscriptionService:
                     CheckoutSession.order_reference == order_reference,
                     CheckoutSession.status == CheckoutStatus.CLAIMED,
                 )
+            )
+            return int(telegram_id) if telegram_id is not None else None
+
+    async def checkout_owner_telegram_id_by_token(self, token: str) -> int | None:
+        async with self.session_factory() as session:
+            telegram_id = await session.scalar(
+                select(User.telegram_id)
+                .join(CheckoutSession, CheckoutSession.user_id == User.id)
+                .where(CheckoutSession.public_token == token)
             )
             return int(telegram_id) if telegram_id is not None else None
 
