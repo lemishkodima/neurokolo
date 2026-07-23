@@ -149,9 +149,11 @@ For the built-in public checkout, direct the club button to:
 https://api.example.com/checkout
 ```
 
-The endpoint creates a checkout server-side and renders a form that posts the signed
-fields directly to WayForPay. After payment, `/checkout/complete` provides the
-personal Telegram claim link. `INTERNAL_API_KEY` is never exposed to the browser.
+The endpoint creates a checkout server-side and automatically posts the signed form
+to WayForPay, so the Telegram button reaches the provider checkout in one click.
+A visible submit button remains as a fallback when JavaScript is unavailable.
+After payment, `/checkout/complete` provides the personal Telegram claim link.
+`INTERNAL_API_KEY` is never exposed to the browser.
 
 For a separate website frontend, its backend can instead call:
 

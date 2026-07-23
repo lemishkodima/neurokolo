@@ -98,7 +98,8 @@ WayForPay callback завжди потребує публічної адреси
 2. Внутрішній endpoint захищається заголовком `X-Internal-API-Key`.
 3. API повертає `gateway_url`, підписані `gateway_fields`,
    `bot_claim_url` і `order_reference`.
-4. Форма відправляється на платіжну сторінку WayForPay.
+4. Підписана форма автоматично відправляється на платіжну сторінку WayForPay;
+   видима кнопка залишається fallback для браузерів без JavaScript.
 5. WayForPay викликає `POST /webhooks/wayforpay`.
 6. Callback приймається тільки після перевірки HMAC-MD5.
 7. Approved-платіж активує/продовжує підписку.
@@ -247,8 +248,8 @@ NEUROKOLO_VENV=/Users/mac/Library/Caches/neurokolo/venv
 - Prometheus збирає API-метрики й контролює unmatched approved payments.
 - Python-залежності й базові Docker images зафіксовані lock/hash/digest.
 - Production-конфігурація fail-fast відхиляє placeholder-домени та dev credentials.
-- Вбудований checkout рендерить підписану WayForPay-форму server-side та повертає
-  користувача до персонального Telegram claim URL.
+- Вбудований checkout рендерить підписану WayForPay-форму server-side, автоматично
+  відправляє її до WayForPay та повертає користувача до персонального Telegram claim URL.
 
 ## Найближчі кроки
 

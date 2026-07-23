@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -120,15 +121,20 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
 
     assert payment_page.status_code == 200
     assert 'action="https://secure.example.test/pay"' in payment_page.text
+    assert 'id="wayforpay-checkout"' in payment_page.text
+    assert 'document.getElementById("wayforpay-checkout").submit();' in payment_page.text
     assert 'name="productName[]"' in payment_page.text
     assert "990.00 UAH" in payment_page.text
     assert (
         "https://api.example.test/checkout/complete"
         f"?token={checkout.checkout_token}" in payment_page.text
     )
-    assert "form-action https://secure.example.test" in payment_page.headers[
-        "content-security-policy"
-    ]
+    content_security_policy = payment_page.headers["content-security-policy"]
+    assert "form-action https://secure.example.test" in content_security_policy
+    nonce_match = re.search(r'<script nonce="([^"]+)">', payment_page.text)
+    assert nonce_match is not None
+    assert f"script-src 'nonce-{nonce_match.group(1)}'" in content_security_policy
+    assert "script-src 'unsafe-inline'" not in content_security_policy
     create_checkout.assert_awaited_once_with(
         plan_code=settings.default_plan_code,
         email=None,

@@ -25,13 +25,19 @@ from club_bot.schemas import CheckoutCreate, CheckoutResponse
 from club_bot.services.subscriptions import PlanNotFoundError
 
 
-def _checkout_response_headers(form_action: str | None = None) -> dict[str, str]:
+def _checkout_response_headers(
+    form_action: str | None = None,
+    script_nonce: str | None = None,
+) -> dict[str, str]:
     form_policy = f" form-action {form_action};" if form_action else " form-action 'none';"
+    script_policy = (
+        f" script-src 'nonce-{script_nonce}';" if script_nonce else " script-src 'none';"
+    )
     return {
         "Cache-Control": "no-store",
         "Content-Security-Policy": (
             "default-src 'none'; style-src 'unsafe-inline'; img-src 'none';"
-            f"{form_policy} base-uri 'none'; frame-ancestors 'none'"
+            f"{script_policy}{form_policy} base-uri 'none'; frame-ancestors 'none'"
         ),
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
@@ -85,7 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.2.0-rc4", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.2.0-rc5", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -248,6 +254,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gateway_url = escape(checkout.gateway_url, quote=True)
         gateway_parts = urlsplit(checkout.gateway_url)
         form_action = f"{gateway_parts.scheme}://{gateway_parts.netloc}"
+        script_nonce = secrets.token_urlsafe(18)
+        escaped_script_nonce = escape(script_nonce, quote=True)
         body = f"""<!doctype html>
 <html lang="uk">
 <head>
@@ -270,18 +278,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 <body>
   <main>
     <h1>Підписка Neurokolo</h1>
-    <p>Ви переходите на захищену платіжну сторінку WayForPay.</p>
-    <form method="post" action="{gateway_url}">
+    <p>Переходимо на захищену платіжну сторінку WayForPay…</p>
+    <form id="wayforpay-checkout" method="post" action="{gateway_url}">
       {_gateway_form_inputs(gateway_fields)}
-      <button type="submit">Оплатити {amount} {currency}</button>
+      <button type="submit">Продовжити до оплати {amount} {currency}</button>
     </form>
-    <small>Дані картки вводяться лише на стороні WayForPay.</small>
+    <small>Якщо перехід не відбувся автоматично, натисніть кнопку. Дані картки
+      вводяться лише на стороні WayForPay.</small>
   </main>
+  <script nonce="{escaped_script_nonce}">
+    document.getElementById("wayforpay-checkout").submit();
+  </script>
 </body>
 </html>"""
         return HTMLResponse(
             content=body,
-            headers=_checkout_response_headers(form_action),
+            headers=_checkout_response_headers(form_action, script_nonce),
         )
 
     @app.get("/checkout/complete", response_class=HTMLResponse, include_in_schema=False)
