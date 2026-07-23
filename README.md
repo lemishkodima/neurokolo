@@ -205,7 +205,8 @@ The endpoint creates a checkout server-side and automatically posts the signed f
 to WayForPay, so the Telegram button reaches the provider checkout in one click.
 The technical form stays hidden during the automatic transition; a visible submit
 button remains as a fallback when JavaScript is unavailable.
-After payment, `/checkout/complete` provides the personal Telegram claim link.
+After payment, `GET` or provider `POST` to `/checkout/complete` provides the personal Telegram
+claim link.
 `INTERNAL_API_KEY` is never exposed to the browser.
 
 For a separate website frontend, its backend can instead call:

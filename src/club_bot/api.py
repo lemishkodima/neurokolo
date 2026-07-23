@@ -148,7 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.4.0-rc1", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.4.0-rc2", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -407,7 +407,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers=_checkout_response_headers(form_action, script_nonce),
         )
 
-    @app.get("/checkout/complete", response_class=HTMLResponse, include_in_schema=False)
+    @app.api_route(
+        "/checkout/complete",
+        methods=["GET", "POST"],
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
     async def public_checkout_complete(
         token: str = Query(min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_-]+$"),
         container: Container = Depends(container_from_request),

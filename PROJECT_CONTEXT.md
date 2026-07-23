@@ -111,7 +111,8 @@ WayForPay callback завжди потребує публічної адреси
 8. Якщо платіж ще не прив'язаний до Telegram-користувача, `bot_claim_url`
    завершує прив'язку.
 9. Після успішної прив'язки бот надсилає підтвердження та invite-кнопки.
-10. `GET /checkout/complete` повертає користувача до персонального Telegram claim URL.
+10. `GET` або provider `POST` на `/checkout/complete` повертає користувача до
+    персонального Telegram claim URL.
 
 Тестовий режим WayForPay:
 

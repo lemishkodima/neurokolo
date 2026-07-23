@@ -119,6 +119,10 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
             "/checkout/complete",
             params={"token": checkout.checkout_token},
         )
+        completion_post_page = await client.post(
+            "/checkout/complete",
+            params={"token": checkout.checkout_token},
+        )
 
     assert payment_page.status_code == 200
     assert 'action="https://secure.example.test/pay"' in payment_page.text
@@ -153,6 +157,12 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         in completion_page.text
     )
     assert completion_page.headers["cache-control"] == "no-store"
+    assert completion_post_page.status_code == 200
+    assert (
+        f"https://t.me/{settings.bot_username}?start=claim_{checkout.checkout_token}"
+        in completion_post_page.text
+    )
+    assert completion_post_page.headers["cache-control"] == "no-store"
 
 
 async def test_public_landing_renders_safe_values_and_proxies_bot_avatar() -> None:
