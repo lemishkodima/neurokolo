@@ -19,6 +19,7 @@ from club_bot.config import Settings
 from club_bot.integrations.wayforpay import WayForPayError
 from club_bot.services.access import AccessDeniedError, AccessService
 from club_bot.services.admin import SettingsService
+from club_bot.services.landing_templates import LandingTemplateService
 from club_bot.services.subscription_notifications import SubscriptionNotificationService
 from club_bot.services.subscriptions import (
     CheckoutExpiredError,
@@ -38,6 +39,7 @@ async def start(
     message: Message,
     command: CommandObject,
     user_service: UserService,
+    landing_template_service: LandingTemplateService,
     subscription_service: SubscriptionService,
     settings_service: SettingsService,
     subscription_notification_service: SubscriptionNotificationService,
@@ -46,7 +48,15 @@ async def start(
         return
     argument = command.args or ""
     referral_code = argument.removeprefix("ref_") if argument.startswith("ref_") else None
-    await user_service.upsert_telegram_user(message.from_user, referral_code=referral_code)
+    user = await user_service.upsert_telegram_user(
+        message.from_user,
+        referral_code=referral_code,
+    )
+    if argument.startswith("landing_"):
+        await landing_template_service.record_start(
+            user_id=user.id,
+            slug=argument.removeprefix("landing_"),
+        )
     labels = await settings_service.labels()
 
     if argument.startswith("claim_"):

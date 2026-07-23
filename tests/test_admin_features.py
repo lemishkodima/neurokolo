@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,18 +9,30 @@ from typing import Any
 
 import pytest
 from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.types import User as TelegramUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.bot.admin_router import _parse_buttons
+from club_bot.bot.routers import start
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
-from club_bot.domain.enums import BroadcastStatus, BroadcastTarget, DeliveryStatus, ResourceType
+from club_bot.domain.enums import (
+    BroadcastStatus,
+    BroadcastTarget,
+    DeliveryStatus,
+    PaymentStatus,
+    ResourceType,
+    SubscriptionStatus,
+)
+from club_bot.domain.rules import utc_now
 from club_bot.models import (
     Base,
     Broadcast,
     BroadcastRecipient,
+    Payment,
     Plan,
+    Subscription,
     TelegramResource,
     User,
 )
@@ -169,6 +183,63 @@ async def test_landing_template_crud_validation_and_safe_rendering(tmp_path: Pat
     assert "data:image/jpeg;base64,YXZhdGFy" in rendered
     assert "{{" not in rendered
 
+    async with session_factory() as session, session.begin():
+        first_user = User(
+            telegram_id=501,
+            username="first",
+            first_name="First",
+            referral_code="LANDING-FIRST",
+        )
+        second_user = User(
+            telegram_id=502,
+            first_name="Second",
+            referral_code="LANDING-SECOND",
+        )
+        plan = Plan(code="landing-plan", name="Landing plan", price=Decimal("100"))
+        session.add_all([first_user, second_user, plan])
+        await session.flush()
+        first_user_id = first_user.id
+        second_user_id = second_user.id
+        plan_id = plan.id
+
+    assert await service.record_start(user_id=first_user_id, slug=template.slug) is True
+    assert await service.record_start(user_id=first_user_id, slug=template.slug) is True
+    assert await service.record_start(user_id=second_user_id, slug=template.slug) is True
+    assert await service.record_start(user_id=second_user_id, slug="missing") is False
+
+    async with session_factory() as session, session.begin():
+        subscription = Subscription(
+            user_id=first_user_id,
+            plan_id=plan_id,
+            status=SubscriptionStatus.ACTIVE,
+            billing_amount=Decimal("100"),
+            billing_currency="UAH",
+        )
+        session.add(subscription)
+        await session.flush()
+        session.add(
+            Payment(
+                subscription_id=subscription.id,
+                provider_event_id="landing-approved",
+                order_reference="LANDING-APPROVED",
+                amount=Decimal("100"),
+                currency="UAH",
+                status=PaymentStatus.APPROVED,
+                paid_at=utc_now() + timedelta(minutes=1),
+                provider_payload={},
+            )
+        )
+
+    statistics = await service.statistics(template.id)
+    assert statistics.total_starts == 3
+    assert statistics.unique_users == 2
+    assert statistics.paid_users == 1
+    assert statistics.conversion_percent == 50.0
+    visitor_ids = [visitor.telegram_id for visitor in statistics.recent_visitors]
+    assert len(visitor_ids) == 3
+    assert visitor_ids.count(501) == 2
+    assert visitor_ids.count(502) == 1
+
     with pytest.raises(LandingTemplateError):
         service.validate_html("<html><script>alert(1)</script>{{open_url}}</html>")
     with pytest.raises(LandingTemplateError):
@@ -178,6 +249,61 @@ async def test_landing_template_crud_validation_and_safe_rendering(tmp_path: Pat
 
     assert await service.delete(template.id) is True
     assert await service.get(template.id) is None
+
+
+async def test_start_records_landing_source() -> None:
+    user_id = uuid.uuid4()
+
+    class FakeUserService:
+        async def upsert_telegram_user(
+            self, _telegram_user: TelegramUser, *, referral_code: str | None
+        ) -> SimpleNamespace:
+            assert referral_code is None
+            return SimpleNamespace(id=user_id)
+
+    class FakeLandingService:
+        def __init__(self) -> None:
+            self.recorded: list[tuple[uuid.UUID, str]] = []
+
+        async def record_start(self, *, user_id: uuid.UUID, slug: str) -> bool:
+            self.recorded.append((user_id, slug))
+            return True
+
+    class FakeSettingsService:
+        async def labels(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                about="About",
+                join="Join",
+                subscription="Subscription",
+                materials="Materials",
+                support="Support",
+            )
+
+        async def get(self, key: str) -> str:
+            assert key == "welcome_text"
+            return "Welcome"
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = TelegramUser(id=501, is_bot=False, first_name="First")
+            self.answers: list[str] = []
+
+        async def answer(self, text: str, **_kwargs: object) -> None:
+            self.answers.append(text)
+
+    landing_service = FakeLandingService()
+    message = FakeMessage()
+    await start(
+        message,  # type: ignore[arg-type]
+        SimpleNamespace(args="landing_instagram-july"),  # type: ignore[arg-type]
+        FakeUserService(),  # type: ignore[arg-type]
+        landing_service,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    assert landing_service.recorded == [(user_id, "instagram-july")]
+    assert message.answers == ["Welcome"]
 
 
 async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:

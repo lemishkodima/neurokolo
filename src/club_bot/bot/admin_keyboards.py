@@ -248,6 +248,12 @@ def landing_template_actions_keyboard(
             [InlineKeyboardButton(text="👁 Відкрити сторінку", url=public_url)],
             [
                 InlineKeyboardButton(
+                    text="📈 Переходи та оплати",
+                    callback_data=f"adm:landing_stats:{template_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="✏️ Назва",
                     callback_data=f"adm:landing_edit:n:{template_id}",
                 ),

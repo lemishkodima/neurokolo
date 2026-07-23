@@ -274,6 +274,26 @@ class LandingTemplate(TimestampMixin, Base):
     created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
 
+class LandingVisit(TimestampMixin, Base):
+    __tablename__ = "landing_visits"
+    __table_args__ = (
+        Index("ix_landing_visits_template_created", "landing_template_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    landing_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("landing_templates.id", ondelete="SET NULL"),
+        index=True,
+    )
+    landing_slug: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+
+
 class Broadcast(TimestampMixin, Base):
     __tablename__ = "broadcasts"
     __table_args__ = (Index("ix_broadcasts_queue", "status", "scheduled_at"),)

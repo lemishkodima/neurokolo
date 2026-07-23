@@ -108,7 +108,8 @@ The panel supports:
 - assigning a formatted post, photo/video, media album, and optional URL buttons to each main
   user-menu action;
 - enabling isolated WayForPay test checkout for 30 minutes from the admin panel;
-- creating, previewing, editing, downloading, and deleting branded HTML entry pages;
+- creating, previewing, editing, downloading, and deleting branded HTML entry pages with
+  per-page Telegram attribution and approved-payment conversion statistics;
 - adding and revoking additional administrator IDs.
 
 For Telegram access management, add the bot as an administrator to every private channel and
@@ -166,6 +167,13 @@ placeholders are rejected. A restrictive response Content Security Policy is als
 The admin page for each template supports public preview, editing every metadata field, replacing
 or downloading the HTML file, and permanent deletion. Deleting a template immediately makes its
 public URL return 404.
+
+Every generated `open_url` contains `start=landing_<slug>`. When Telegram sends that `/start`,
+the bot records the template, user, and time. Open the template in `/admin` and select
+`📈 Переходи та оплати` to see total starts, unique users, users with an approved payment after
+the visit, conversion percentage, and the 10 most recent visitors. Repeat starts are retained in
+the total while the unique-user metric counts each Telegram account once. Browser page views
+without a subsequent Telegram `/start` are intentionally not counted as bot arrivals.
 
 ## CLI configuration (alternative)
 

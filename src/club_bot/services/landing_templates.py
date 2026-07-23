@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 from typing import Final
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from club_bot.models import LandingTemplate
+from club_bot.domain.enums import PaymentStatus
+from club_bot.models import LandingTemplate, LandingVisit, Payment, Subscription, User
 
 MAX_HTML_TEMPLATE_BYTES: Final = 256 * 1024
 DEFAULT_DOWNLOAD_URL: Final = "https://telegram.org/apps"
@@ -44,6 +47,29 @@ class LandingTemplateNotFoundError(LookupError):
 
 class LandingTemplateSlugExistsError(LandingTemplateError):
     pass
+
+
+@dataclass(frozen=True)
+class LandingVisitor:
+    seen_at: datetime
+    telegram_id: int
+    username: str | None
+    first_name: str
+    last_name: str | None
+
+
+@dataclass(frozen=True)
+class LandingStatistics:
+    total_starts: int
+    unique_users: int
+    paid_users: int
+    recent_visitors: list[LandingVisitor]
+
+    @property
+    def conversion_percent(self) -> float:
+        if self.unique_users == 0:
+            return 0.0
+        return round(self.paid_users / self.unique_users * 100, 1)
 
 
 class LandingTemplateService:
@@ -148,6 +174,81 @@ class LandingTemplateService:
                 return False
             await session.delete(template)
             return True
+
+    async def record_start(self, *, user_id: uuid.UUID, slug: str) -> bool:
+        if not SLUG_PATTERN.fullmatch(slug) or len(slug) > 56:
+            return False
+        async with self.session_factory() as session, session.begin():
+            template = await session.scalar(
+                select(LandingTemplate).where(LandingTemplate.slug == slug)
+            )
+            if template is None:
+                return False
+            session.add(
+                LandingVisit(
+                    landing_template_id=template.id,
+                    landing_slug=template.slug,
+                    user_id=user_id,
+                )
+            )
+            return True
+
+    async def statistics(self, template_id: uuid.UUID) -> LandingStatistics:
+        async with self.session_factory() as session:
+            total_starts, unique_users = (
+                await session.execute(
+                    select(
+                        func.count(LandingVisit.id),
+                        func.count(distinct(LandingVisit.user_id)),
+                    ).where(LandingVisit.landing_template_id == template_id)
+                )
+            ).one()
+            approved_after_visit = (
+                select(Payment.id)
+                .join(Subscription, Subscription.id == Payment.subscription_id)
+                .where(
+                    Subscription.user_id == LandingVisit.user_id,
+                    Payment.status == PaymentStatus.APPROVED,
+                    Payment.paid_at >= LandingVisit.created_at,
+                )
+                .exists()
+            )
+            paid_users = await session.scalar(
+                select(func.count(distinct(LandingVisit.user_id))).where(
+                    LandingVisit.landing_template_id == template_id,
+                    approved_after_visit,
+                )
+            )
+            recent_rows = (
+                await session.execute(
+                    select(
+                        LandingVisit.created_at,
+                        User.telegram_id,
+                        User.username,
+                        User.first_name,
+                        User.last_name,
+                    )
+                    .join(User, User.id == LandingVisit.user_id)
+                    .where(LandingVisit.landing_template_id == template_id)
+                    .order_by(LandingVisit.created_at.desc())
+                    .limit(10)
+                )
+            ).all()
+        return LandingStatistics(
+            total_starts=int(total_starts or 0),
+            unique_users=int(unique_users or 0),
+            paid_users=int(paid_users or 0),
+            recent_visitors=[
+                LandingVisitor(
+                    seen_at=row[0],
+                    telegram_id=row[1],
+                    username=row[2],
+                    first_name=row[3],
+                    last_name=row[4],
+                )
+                for row in recent_rows
+            ],
+        )
 
     @classmethod
     def render(

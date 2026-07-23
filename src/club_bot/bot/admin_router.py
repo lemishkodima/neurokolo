@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from html import escape
 from io import BytesIO
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -72,6 +73,7 @@ RICH_TEXT_SETTINGS = frozenset(
         "payment_success_text",
     }
 )
+KYIV_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 
 async def _authorized(event: Message | CallbackQuery, admin_service: AdminService) -> bool:
@@ -753,6 +755,59 @@ async def edit_landing_template(
             current = escape(str(getattr(template, field)))
             prompt = f"Поточне значення:\n<code>{current}</code>\n\nВведіть {label}:"
         await callback.message.edit_text(prompt)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:landing_stats:"))
+async def show_landing_template_statistics(
+    callback: CallbackQuery,
+    settings: Settings,
+    admin_service: AdminService,
+    landing_template_service: LandingTemplateService,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    template = await landing_template_service.get(uuid.UUID(callback.data.rsplit(":", 1)[1]))
+    if template is None:
+        await callback.answer("Шаблон не знайдено", show_alert=True)
+        return
+    statistics = await landing_template_service.statistics(template.id)
+    lines = [
+        f"<b>📈 Джерело: {escape(template.name)}</b>",
+        f"Slug: <code>{escape(template.slug)}</code>",
+        "",
+        f"Переходів у бот: <b>{statistics.total_starts}</b>",
+        f"Унікальних користувачів: <b>{statistics.unique_users}</b>",
+        f"Оплатили після переходу: <b>{statistics.paid_users}</b>",
+        f"Конверсія: <b>{statistics.conversion_percent:.1f}%</b>",
+        "",
+        "<b>Останні переходи</b>",
+    ]
+    if statistics.recent_visitors:
+        for visitor in statistics.recent_visitors:
+            seen_at = visitor.seen_at.astimezone(KYIV_TIMEZONE)
+            username = (
+                f"@{escape(visitor.username)}"
+                if visitor.username
+                else f"<code>{visitor.telegram_id}</code>"
+            )
+            full_name = " ".join(
+                part for part in (visitor.first_name, visitor.last_name) if part
+            )
+            lines.append(
+                f"{seen_at:%d.%m %H:%M} · {username} · {escape(full_name)}"
+            )
+    else:
+        lines.append("Переходів із цієї сторінки ще не було.")
+    public_url = f"{settings.landing_base_url}/join/{template.slug}"
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=landing_template_actions_keyboard(
+                template,
+                public_url=public_url,
+            ),
+        )
     await callback.answer()
 
 
