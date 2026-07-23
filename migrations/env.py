@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from logging.config import fileConfig
 from typing import Any
 
@@ -9,14 +8,14 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from club_bot.config import get_settings
 from club_bot.models import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-if database_url := os.getenv("DATABASE_URL"):
-    config.set_main_option("sqlalchemy.url", database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 target_metadata = Base.metadata
 
@@ -54,4 +53,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     asyncio.run(run_async_migrations())
-
