@@ -116,20 +116,20 @@ async def join(
             [{"text": invite.name, "url": invite.url, "style": "success"}]
             for invite in invites
         ]
-        if await _send_configured_content(
+        configured = await _send_configured_content(
             message,
             "join",
             settings_service,
             bot,
             extra_buttons=invite_buttons,
-        ):
-            return
+        )
         if invites:
-            await message.answer(
-                "Ваш доступ активний. Натисніть кнопку нижче та подайте заявку — "
-                "бот автоматично підтвердить лише ваш Telegram-акаунт.",
-                reply_markup=resource_links([(invite.name, invite.url) for invite in invites]),
-            )
+            if not configured:
+                await message.answer(
+                    "Ваш доступ активний. Натисніть кнопку нижче та подайте заявку — "
+                    "бот автоматично підтвердить лише ваш Telegram-акаунт.",
+                    reply_markup=resource_links([(invite.name, invite.url) for invite in invites]),
+                )
         else:
             await message.answer("Підписка активна, але для тарифу ще не додано каналів.")
         return

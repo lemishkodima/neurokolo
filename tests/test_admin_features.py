@@ -417,6 +417,38 @@ async def test_join_with_subscription_sends_configured_content_and_invite() -> N
     assert keyboard[1][0].style == "success"
 
 
+async def test_join_with_subscription_without_resources_reports_configuration() -> None:
+    class FakeAccessService:
+        async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
+            assert telegram_id == 501
+            return []
+
+    class FakeSettingsService:
+        async def menu_content(self, action: str) -> None:
+            assert action == "join"
+            return None
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = TelegramUser(id=501, is_bot=False, first_name="Member")
+            self.chat = SimpleNamespace(id=501)
+            self.answers: list[str] = []
+
+        async def answer(self, text: str, **_kwargs: object) -> None:
+            self.answers.append(text)
+
+    message = FakeMessage()
+    await join(
+        message,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        FakeAccessService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert message.answers == ["Підписка активна, але для тарифу ще не додано каналів."]
+
+
 async def test_materials_only_sends_admin_content() -> None:
     class FakeSettingsService:
         async def menu_content(self, action: str) -> TelegramContent:
