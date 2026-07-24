@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.bot.admin_router import _parse_buttons
-from club_bot.bot.routers import join, materials, start
+from club_bot.bot.routers import join, materials, start, support
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import (
@@ -570,6 +570,38 @@ async def test_materials_only_sends_admin_content() -> None:
     )
     await materials(
         message,  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        FakeBot(),  # type: ignore[arg-type]
+    )
+
+
+async def test_support_configured_content_replaces_legacy_fallback() -> None:
+    class FakeSettingsService:
+        async def menu_content(self, action: str) -> TelegramContent:
+            assert action == "support"
+            return TelegramContent(
+                source_chat_id=100,
+                source_message_ids=[30],
+                buttons=[],
+            )
+
+    class FakeBot:
+        async def copy_messages(
+            self, *, chat_id: int, from_chat_id: int, message_ids: list[int]
+        ) -> list[SimpleNamespace]:
+            assert (chat_id, from_chat_id, message_ids) == (501, 100, [30])
+            return [SimpleNamespace(message_id=902)]
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(id=501)
+
+        async def answer(self, _text: str) -> None:
+            pytest.fail("Configured support content must replace the legacy fallback")
+
+    await support(
+        FakeMessage(),  # type: ignore[arg-type]
+        SimpleNamespace(support_username="replace_me"),  # type: ignore[arg-type]
         FakeSettingsService(),  # type: ignore[arg-type]
         FakeBot(),  # type: ignore[arg-type]
     )

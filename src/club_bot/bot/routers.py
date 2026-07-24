@@ -269,8 +269,8 @@ async def support(
     settings_service: SettingsService,
     bot: Bot,
 ) -> None:
-    await _send_configured_content(message, "support", settings_service, bot)
-    await message.answer(f"Підтримка: @{escape(settings.support_username)}")
+    if not await _send_configured_content(message, "support", settings_service, bot):
+        await message.answer(f"Підтримка: @{escape(settings.support_username)}")
 
 
 @router.message(Command("help"))

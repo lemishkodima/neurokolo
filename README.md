@@ -152,6 +152,8 @@ same user-menu button offers the personal checkout instead.
 
 The `Матеріали` action sends exactly the content configured by an administrator. It can contain
 text, one media item, an album, and URL buttons, and it does not create Telegram invite links.
+Configured `Техпідтримка` content fully replaces the legacy `SUPPORT_USERNAME` fallback instead
+of being followed by a second, stale support message.
 
 After sending the content and `/done`, enter buttons as:
 
