@@ -1107,7 +1107,9 @@ async def menu_content_done(
     await state.set_state(MenuContentStates.buttons)
     await message.answer(
         "Додайте URL-кнопки у форматі:\n"
-        "<code>Сайт | https://example.com</code>\n\n"
+        "<code>Сайт - https://example.com (синій)</code>\n\n"
+        "Кольори: <code>синій</code>, <code>зелений</code>, <code>червоний</code>. "
+        "Колір можна не вказувати.\n"
         "Кожен рядок — окремий ряд кнопок, <code>;;</code> розділяє кнопки в одному рядку. "
         "Якщо вони не потрібні — /skip."
     )
@@ -1450,19 +1452,50 @@ async def stats(
 
 
 def _parse_buttons(text: str) -> list[list[dict[str, str]]]:
+    styles = {
+        "синій": "primary",
+        "синя": "primary",
+        "blue": "primary",
+        "primary": "primary",
+        "зелений": "success",
+        "зелена": "success",
+        "green": "success",
+        "success": "success",
+        "червоний": "danger",
+        "червона": "danger",
+        "red": "danger",
+        "danger": "danger",
+    }
     rows: list[list[dict[str, str]]] = []
     for raw_row in text.splitlines():
         if not raw_row.strip():
             continue
         row: list[dict[str, str]] = []
         for raw_button in raw_row.split(";;"):
-            parts = [item.strip() for item in raw_button.split("|", maxsplit=1)]
+            separator = "|" if "|" in raw_button else " - "
+            parts = [item.strip() for item in raw_button.split(separator, maxsplit=1)]
             if len(parts) != 2 or not all(parts):
-                raise ValueError("кожна кнопка повинна мати формат Назва | URL")
-            parsed = urlparse(parts[1])
+                raise ValueError(
+                    "кожна кнопка повинна мати формат Назва - URL (колір)"
+                )
+            raw_url = parts[1]
+            style: str | None = None
+            if raw_url.endswith(")") and " (" in raw_url:
+                raw_url, raw_style = raw_url.rsplit(" (", maxsplit=1)
+                style_name = raw_style[:-1].strip().casefold()
+                style = styles.get(style_name)
+                if style is None:
+                    raise ValueError(
+                        "колір має бути: синій, зелений або червоний"
+                    )
+                raw_url = raw_url.strip()
+            parsed = urlparse(raw_url)
             if parsed.scheme not in {"http", "https", "tg"}:
                 raise ValueError("URL має починатися з https://, http:// або tg://")
-            row.append({"text": parts[0][:64], "url": parts[1]})
+            button = {"text": parts[0][:64], "url": raw_url}
+            if style is not None:
+                button["style"] = style
+            row.append(button)
         rows.append(row)
     if not rows:
         raise ValueError("не знайдено жодної кнопки")

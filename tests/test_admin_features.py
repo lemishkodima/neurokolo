@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.bot.admin_router import _parse_buttons
-from club_bot.bot.routers import join, start
+from club_bot.bot.routers import join, materials, start
 from club_bot.bot.system_router import track_bot_membership
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import (
@@ -38,6 +38,7 @@ from club_bot.models import (
     TelegramResource,
     User,
 )
+from club_bot.services.access import AccessDeniedError, ResourceInvite
 from club_bot.services.admin import (
     AdminService,
     CatalogService,
@@ -48,7 +49,7 @@ from club_bot.services.broadcasts import BroadcastService
 from club_bot.services.checkout_links import verify_personal_checkout_token
 from club_bot.services.landing_templates import LandingTemplateError, LandingTemplateService
 from club_bot.services.stats import StatsService
-from club_bot.services.telegram_content import TelegramContent
+from club_bot.services.telegram_content import TelegramContent, url_buttons_markup
 
 
 async def _database(tmp_path: Path) -> async_sessionmaker[AsyncSession]:
@@ -310,6 +311,10 @@ async def test_start_records_landing_source() -> None:
 
 
 async def test_join_button_contains_signed_personal_checkout_owner() -> None:
+    class FakeAccessService:
+        async def create_invites(self, _telegram_id: int) -> list[ResourceInvite]:
+            raise AccessDeniedError
+
     class FakeSettingsService:
         async def menu_content(self, _action: str) -> None:
             return None
@@ -332,6 +337,7 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
     await join(
         message,  # type: ignore[arg-type]
         settings,  # type: ignore[arg-type]
+        FakeAccessService(),  # type: ignore[arg-type]
         FakeSettingsService(),  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
     )
@@ -341,6 +347,108 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
     assert button_url is not None
     owner_token = parse_qs(urlsplit(button_url).query)["owner"][0]
     assert verify_personal_checkout_token(owner_token, "internal-secret") == 501
+
+
+async def test_join_with_subscription_sends_configured_content_and_invite() -> None:
+    class MessageId:
+        message_id = 900
+
+    class FakeAccessService:
+        async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
+            assert telegram_id == 501
+            return [ResourceInvite(name="Закритий канал", url="https://t.me/+personal")]
+
+    class FakeSettingsService:
+        async def menu_content(self, action: str) -> TelegramContent:
+            assert action == "join"
+            return TelegramContent(
+                source_chat_id=100,
+                source_message_ids=[10],
+                buttons=[
+                    [
+                        {
+                            "text": "Правила",
+                            "url": "https://example.com/rules",
+                            "style": "primary",
+                        }
+                    ]
+                ],
+            )
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.markup: object | None = None
+
+        async def copy_messages(
+            self, *, chat_id: int, from_chat_id: int, message_ids: list[int]
+        ) -> list[MessageId]:
+            assert (chat_id, from_chat_id, message_ids) == (501, 100, [10])
+            return [MessageId()]
+
+        async def edit_message_reply_markup(
+            self, *, chat_id: int, message_id: int, reply_markup: object
+        ) -> None:
+            assert (chat_id, message_id) == (501, 900)
+            self.markup = reply_markup
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = TelegramUser(id=501, is_bot=False, first_name="Member")
+            self.chat = SimpleNamespace(id=501)
+
+        async def answer(self, _text: str, **_kwargs: object) -> None:
+            pytest.fail("Configured paid content must be copied instead of a fallback answer")
+
+    bot = FakeBot()
+    await join(
+        FakeMessage(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        FakeAccessService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        bot,  # type: ignore[arg-type]
+    )
+
+    assert bot.markup is not None
+    keyboard = bot.markup.inline_keyboard  # type: ignore[union-attr]
+    assert keyboard[0][0].text == "Правила"
+    assert keyboard[0][0].style == "primary"
+    assert keyboard[1][0].text == "Закритий канал"
+    assert keyboard[1][0].url == "https://t.me/+personal"
+    assert keyboard[1][0].style == "success"
+
+
+async def test_materials_only_sends_admin_content() -> None:
+    class FakeSettingsService:
+        async def menu_content(self, action: str) -> TelegramContent:
+            assert action == "materials"
+            return TelegramContent(
+                source_chat_id=100,
+                source_message_ids=[20],
+                buttons=[[{"text": "Конспект", "url": "https://example.com/notes"}]],
+            )
+
+    class FakeBot:
+        async def copy_messages(
+            self, *, chat_id: int, from_chat_id: int, message_ids: list[int]
+        ) -> list[SimpleNamespace]:
+            assert (chat_id, from_chat_id, message_ids) == (501, 100, [20])
+            return [SimpleNamespace(message_id=901)]
+
+        async def edit_message_reply_markup(
+            self, *, chat_id: int, message_id: int, reply_markup: object
+        ) -> None:
+            assert (chat_id, message_id) == (501, 901)
+            assert reply_markup.inline_keyboard[0][0].text == "Конспект"  # type: ignore[attr-defined]
+
+    message = SimpleNamespace(
+        from_user=TelegramUser(id=501, is_bot=False, first_name="Member"),
+        chat=SimpleNamespace(id=501),
+    )
+    await materials(
+        message,  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        FakeBot(),  # type: ignore[arg-type]
+    )
 
 
 async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:
@@ -452,3 +560,35 @@ def test_broadcast_button_parser_supports_rows() -> None:
     )
     assert len(buttons) == 2
     assert len(buttons[0]) == 2
+
+
+def test_button_parser_supports_telegram_colors() -> None:
+    buttons = _parse_buttons(
+        "Канал - https://t.me/example (зелений) ;; "
+        "Сайт - https://example.com (синій)\n"
+        "Видалити - tg://resolve?domain=test (червоний)"
+    )
+
+    assert buttons == [
+        [
+            {"text": "Канал", "url": "https://t.me/example", "style": "success"},
+            {"text": "Сайт", "url": "https://example.com", "style": "primary"},
+        ],
+        [
+            {
+                "text": "Видалити",
+                "url": "tg://resolve?domain=test",
+                "style": "danger",
+            }
+        ],
+    ]
+    markup = url_buttons_markup(buttons)
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].style == "success"
+    assert markup.inline_keyboard[0][1].style == "primary"
+    assert markup.inline_keyboard[1][0].style == "danger"
+
+
+def test_button_parser_rejects_unknown_color() -> None:
+    with pytest.raises(ValueError, match="колір має бути"):
+        _parse_buttons("Сайт - https://example.com (фіолетовий)")

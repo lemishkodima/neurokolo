@@ -20,7 +20,14 @@ def url_buttons_markup(
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=item["text"], url=item["url"]) for item in row]
+            [
+                InlineKeyboardButton(
+                    text=item["text"],
+                    url=item["url"],
+                    style=item.get("style"),
+                )
+                for item in row
+            ]
             for row in buttons
         ]
     )
@@ -31,13 +38,14 @@ async def copy_telegram_content(
     *,
     destination_chat_id: int,
     content: TelegramContent,
+    extra_buttons: list[list[dict[str, str]]] | None = None,
 ) -> None:
     copied = await bot.copy_messages(
         chat_id=destination_chat_id,
         from_chat_id=content.source_chat_id,
         message_ids=content.source_message_ids,
     )
-    markup = url_buttons_markup(content.buttons)
+    markup = url_buttons_markup([*content.buttons, *(extra_buttons or [])])
     if markup and copied:
         await bot.edit_message_reply_markup(
             chat_id=destination_chat_id,

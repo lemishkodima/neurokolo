@@ -129,6 +129,27 @@ The `DEFAULT_PLAN_CODE` tariff cannot be archived, but its display name and pric
 Price changes apply only to newly created checkout sessions because existing checkout and
 subscription amounts are immutable snapshots.
 
+### User-menu content
+
+Open `/admin` → `✏️ Тексти й кнопки` → `📨 Контент кнопок меню`. The `Доєднатися` content is
+shown only to a user with a current entitlement; the bot appends fresh personal join-request
+buttons for every channel or group included in the user's tariff. Without an entitlement, the
+same user-menu button offers the personal checkout instead.
+
+The `Матеріали` action sends exactly the content configured by an administrator. It can contain
+text, one media item, an album, and URL buttons, and it does not create Telegram invite links.
+
+After sending the content and `/done`, enter buttons as:
+
+```text
+Назва - https://example.com (синій)
+Інструкція - https://example.com/help (зелений) ;; Підтримка - tg://resolve?domain=support (червоний)
+```
+
+Each line is a keyboard row and `;;` places buttons in the same row. The optional styles are
+`синій`, `зелений`, and `червоний`; when omitted, Telegram uses its client-specific default.
+The legacy `Назва | URL` syntax remains accepted.
+
 ### WayForPay test payments
 
 Open `/admin` → `💳 Оплата WayForPay` → `🧪 Увімкнути тестовий режим`. After confirmation,

@@ -100,12 +100,40 @@ async def about(message: Message, settings_service: SettingsService, bot: Bot) -
 async def join(
     message: Message,
     settings: Settings,
+    access_service: AccessService,
     settings_service: SettingsService,
     bot: Bot,
 ) -> None:
     if message.from_user is None:
         return
-    await _send_configured_content(message, "join", settings_service, bot)
+    try:
+        invites = await access_service.create_invites(message.from_user.id)
+    except AccessDeniedError:
+        invites = None
+
+    if invites is not None:
+        invite_buttons = [
+            [{"text": invite.name, "url": invite.url, "style": "success"}]
+            for invite in invites
+        ]
+        if await _send_configured_content(
+            message,
+            "join",
+            settings_service,
+            bot,
+            extra_buttons=invite_buttons,
+        ):
+            return
+        if invites:
+            await message.answer(
+                "Ваш доступ активний. Натисніть кнопку нижче та подайте заявку — "
+                "бот автоматично підтвердить лише ваш Telegram-акаунт.",
+                reply_markup=resource_links([(invite.name, invite.url) for invite in invites]),
+            )
+        else:
+            await message.answer("Підписка активна, але для тарифу ще не додано каналів.")
+        return
+
     owner_token = create_personal_checkout_token(
         message.from_user.id,
         settings.internal_api_key.get_secret_value(),
@@ -152,26 +180,13 @@ async def subscription_status(
 @router.message(Command("materials"))
 async def materials(
     message: Message,
-    access_service: AccessService,
     settings_service: SettingsService,
     bot: Bot,
 ) -> None:
     if message.from_user is None:
         return
-    await _send_configured_content(message, "materials", settings_service, bot)
-    try:
-        invites = await access_service.create_invites(message.from_user.id)
-    except AccessDeniedError:
-        await message.answer("Матеріали доступні лише з активною підпискою.")
-        return
-    if not invites:
-        await message.answer("Для вашого тарифу матеріали ще не додані.")
-        return
-    await message.answer(
-        "Ваші ресурси. Посилання персональні та мають обмежений строк дії. "
-        "Подайте заявку — бот автоматично перевірить ваш Telegram-акаунт:",
-        reply_markup=resource_links([(item.name, item.url) for item in invites]),
-    )
+    if not await _send_configured_content(message, "materials", settings_service, bot):
+        await message.answer("Матеріали поки не налаштовані адміністратором.")
 
 
 @router.message(F.text == "Скасувати підписку ❌")
@@ -266,11 +281,11 @@ async def dynamic_menu_action(
         case "about":
             await about(message, settings_service, bot)
         case "join":
-            await join(message, settings, settings_service, bot)
+            await join(message, settings, access_service, settings_service, bot)
         case "subscription":
             await subscription_status(message, subscription_service, settings_service, bot)
         case "materials":
-            await materials(message, access_service, settings_service, bot)
+            await materials(message, settings_service, bot)
         case "support":
             await support(message, settings, settings_service, bot)
 
@@ -280,12 +295,19 @@ async def _send_configured_content(
     action: str,
     settings_service: SettingsService,
     bot: Bot,
+    *,
+    extra_buttons: list[list[dict[str, str]]] | None = None,
 ) -> bool:
     content = await settings_service.menu_content(action)
     if content is None:
         return False
     try:
-        await copy_telegram_content(bot, destination_chat_id=message.chat.id, content=content)
+        await copy_telegram_content(
+            bot,
+            destination_chat_id=message.chat.id,
+            content=content,
+            extra_buttons=extra_buttons,
+        )
     except TelegramAPIError:
         logger.exception("Could not copy configured menu content for %s", action)
         return False
