@@ -16,6 +16,21 @@ async def _worker() -> None:
         while True:
             did_broadcast_work = False
             try:
+                count = (
+                    await container.subscription_notification_service
+                    .process_pending_payment_failures()
+                )
+                if count:
+                    logger.info("Delivered %s failed-payment notifications", count)
+                count = (
+                    await container.subscription_notification_service
+                    .send_due_grace_reminders()
+                )
+                if count:
+                    logger.info("Delivered %s payment grace reminders", count)
+            except Exception:
+                logger.exception("Subscription dunning notification cycle failed")
+            try:
                 count = await container.access_service.expire_due(
                     grace_period_hours=settings.payment_grace_period_hours
                 )
@@ -23,6 +38,15 @@ async def _worker() -> None:
                     logger.info("Revoked %s expired subscriptions", count)
             except Exception:
                 logger.exception("Subscription expiration cycle failed")
+            try:
+                count = (
+                    await container.subscription_notification_service
+                    .send_access_revoked_notifications()
+                )
+                if count:
+                    logger.info("Delivered %s access-revoked notifications", count)
+            except Exception:
+                logger.exception("Access-revoked notification cycle failed")
             try:
                 did_broadcast_work = await container.broadcast_service.process_batch()
             except Exception:

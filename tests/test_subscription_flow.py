@@ -515,6 +515,108 @@ async def test_activation_notification_contains_personal_invite_button() -> None
     assert markup.inline_keyboard[0][0].url == "https://t.me/+personal"  # type: ignore[union-attr]
 
 
+async def test_failed_renewal_records_dunning_and_success_clears_it(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    user_service, subscriptions, wayforpay = services
+    async with session_factory() as session, session.begin():
+        session.add(Plan(code="dunning", name="Dunning", price=490, currency="UAH"))
+    telegram_user = TelegramUser(id=808, is_bot=False, first_name="Dunning")
+    await user_service.upsert_telegram_user(telegram_user)
+    checkout = await subscriptions.create_checkout(
+        plan_code="dunning",
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+        telegram_id=telegram_user.id,
+    )
+
+    callback: dict[str, Any] = {
+        "merchantAccount": "merchant",
+        "orderReference": checkout.order_reference,
+        "amount": "490.00",
+        "currency": "UAH",
+        "authCode": "initial",
+        "cardPan": "42****42",
+        "transactionStatus": "Approved",
+        "reasonCode": 1100,
+        "processingDate": 1_700_000_000,
+        "recToken": "dunning-rec-token",
+        "repayUrl": "https://secure.wayforpay.com/repay/safe-token",
+    }
+
+    def sign(data: dict[str, Any]) -> None:
+        data["merchantSignature"] = wayforpay._sign(
+            [
+                data[key]
+                for key in (
+                    "merchantAccount",
+                    "orderReference",
+                    "amount",
+                    "currency",
+                    "authCode",
+                    "cardPan",
+                    "transactionStatus",
+                    "reasonCode",
+                )
+            ]
+        )
+
+    sign(callback)
+    assert await subscriptions.process_callback(callback) is True
+
+    declined = dict(callback)
+    declined.update(
+        {
+            "authCode": "",
+            "transactionStatus": "Declined",
+            "reasonCode": 1101,
+            "reason": "Not enough funds",
+            "processingDate": 1_700_000_100,
+        }
+    )
+    sign(declined)
+    assert await subscriptions.process_callback(declined) is True
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(Subscription).where(
+                Subscription.provider_subscription_id == checkout.order_reference
+            )
+        )
+        assert stored is not None
+        assert stored.status == SubscriptionStatus.PAST_DUE
+        assert stored.payment_failed_at is not None
+        assert stored.payment_failure_reason == "Not enough funds"
+        assert stored.provider_repay_url == "https://secure.wayforpay.com/repay/safe-token"
+
+    recovered = dict(callback)
+    recovered.update(
+        {
+            "authCode": "recovered",
+            "processingDate": 1_700_000_200,
+            "repayUrl": "https://evil.example/steal",
+        }
+    )
+    sign(recovered)
+    assert await subscriptions.process_callback(recovered) is True
+
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(Subscription).where(
+                Subscription.provider_subscription_id == checkout.order_reference
+            )
+        )
+        assert stored is not None
+        assert stored.status == SubscriptionStatus.ACTIVE
+        assert stored.payment_failed_at is None
+        assert stored.payment_failure_reason is None
+        assert stored.provider_repay_url == "https://secure.wayforpay.com/repay/safe-token"
+
+
 async def test_complete_subscription_lifecycle(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     services: tuple[UserService, SubscriptionService, WayForPayClient],

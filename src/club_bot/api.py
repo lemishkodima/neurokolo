@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc7", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc8", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -319,6 +319,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             if telegram_id is not None:
                 await container.subscription_notification_service.send_activated(telegram_id)
+        elif processed and not approved:
+            rec_token = str(payload.get("recToken") or "") or None
+            await container.subscription_notification_service.send_payment_failed(
+                order_reference,
+                rec_token,
+            )
         return container.subscription_service.callback_response(order_reference)
 
     @app.post(

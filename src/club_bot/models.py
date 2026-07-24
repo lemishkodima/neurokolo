@@ -139,6 +139,19 @@ class Subscription(TimestampMixin, Base):
     provider: Mapped[str] = mapped_column(String(32), default="wayforpay")
     provider_subscription_id: Mapped[str | None] = mapped_column(String(128), unique=True)
     provider_rec_token: Mapped[str | None] = mapped_column(String(255), index=True)
+    provider_repay_url: Mapped[str | None] = mapped_column(Text)
+    payment_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payment_failure_reason: Mapped[str | None] = mapped_column(Text)
+    payment_failed_user_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    grace_reminder_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    access_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_revoked_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     user: Mapped[User] = relationship(back_populates="subscriptions")
     plan: Mapped[Plan] = relationship()
@@ -188,6 +201,7 @@ class Payment(TimestampMixin, Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(Text)
     provider_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    admin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ResourceMembership(TimestampMixin, Base):

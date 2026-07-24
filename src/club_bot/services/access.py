@@ -327,6 +327,7 @@ class AccessService:
                     membership.revoked_at = utc_now()
                     membership.invite_link = None
             subscription.status = SubscriptionStatus.EXPIRED
+            subscription.access_revoked_at = utc_now()
 
     async def expire_due(self, *, grace_period_hours: int, limit: int = 100) -> int:
         cutoff = utc_now() - timedelta(hours=grace_period_hours)

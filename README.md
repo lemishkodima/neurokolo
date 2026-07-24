@@ -305,13 +305,19 @@ Configure WayForPay to call `/webhooks/wayforpay`; the checkout payload already 
 
 ```text
 checkout created → paid → claimed in bot → active
-                                     ↘ failed renewal → past_due
+                                     ↘ failed renewal → past_due → 24h grace → revoked
 cancel button → WayForPay suspended → active until period end
 period end + grace period → expired → removed from all plan resources
 ```
 
 WayForPay is the source of payment events. The database is the source of entitlement state.
 Telegram membership is reconciled from that state by the worker.
+
+For a failed recurring payment the bot immediately warns the member and production admins.
+When WayForPay supplies the signed transaction's `repayUrl`, the member gets a
+`Повторити оплату` button for that same recurring payment. The worker sends one reminder
+before grace expires and a final message after Telegram access is revoked. Successful renewal
+clears all dunning state, so old reminders cannot be sent.
 
 ## Production notes
 
@@ -331,6 +337,8 @@ Telegram membership is reconciled from that state by the worker.
 - Use long random values for both webhook and internal API secrets.
 - Set `PAYMENT_GRACE_PERIOD_HOURS=0` for strict removal at the exact paid-through time. A 24-hour
   grace period better accommodates WayForPay's retry on the following day.
+- `PAYMENT_GRACE_REMINDER_HOURS_BEFORE` controls how many hours before grace expiry the bot
+  sends the one-time reminder (default: `2`).
 - Back up PostgreSQL and monitor unmatched approved payments in the `payments` table.
 - Use one worker replica unless a distributed scheduler and explicit job-claiming state are added.
 

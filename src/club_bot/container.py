@@ -132,6 +132,10 @@ def build_container(settings: Settings) -> Container:
         bot,
         access_service,
         settings_service,
+        session_factory,
+        admin_service,
+        grace_period_hours=settings.payment_grace_period_hours,
+        reminder_hours_before=settings.payment_grace_reminder_hours_before,
     )
     return Container(
         settings=settings,

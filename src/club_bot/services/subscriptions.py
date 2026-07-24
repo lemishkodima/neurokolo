@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -157,7 +158,21 @@ class SubscriptionService:
             await self._attach_referrer_from_checkout(session, user, checkout.referrer_code)
             if checkout.status not in (CheckoutStatus.PAID, CheckoutStatus.CLAIMED):
                 return ClaimResult(paid=False, subscription=None)
-            subscription = await self._activate_checkout(session, checkout)
+            approved_payload = await session.scalar(
+                select(Payment.provider_payload)
+                .where(
+                    Payment.checkout_session_id == checkout.id,
+                    Payment.status == PaymentStatus.APPROVED,
+                    Payment.failure_reason.is_(None),
+                )
+                .order_by(Payment.created_at.desc())
+                .limit(1)
+            )
+            subscription = await self._activate_checkout(
+                session,
+                checkout,
+                repay_url=self._repay_url_from_payload(approved_payload or {}),
+            )
             await session.execute(
                 update(Payment)
                 .where(
@@ -208,8 +223,19 @@ class SubscriptionService:
             session.add(payment)
 
             if not approved:
-                if subscription and subscription.status == SubscriptionStatus.ACTIVE:
+                if subscription and subscription.status in (
+                    SubscriptionStatus.ACTIVE,
+                    SubscriptionStatus.PAST_DUE,
+                ):
+                    if subscription.status == SubscriptionStatus.ACTIVE:
+                        subscription.payment_failed_user_notified_at = None
+                        subscription.grace_reminder_notified_at = None
+                        subscription.access_revoked_at = None
+                        subscription.access_revoked_notified_at = None
                     subscription.status = SubscriptionStatus.PAST_DUE
+                    subscription.payment_failed_at = utc_now()
+                    subscription.payment_failure_reason = payment.failure_reason
+                    self._update_repay_url(subscription, payload)
                 return True
 
             expected_amount: Decimal | None = None
@@ -236,11 +262,18 @@ class SubscriptionService:
                 checkout.paid_at = utc_now()
                 if checkout.user_id is not None:
                     subscription = await self._activate_checkout(
-                        session, checkout, rec_token=rec_token
+                        session,
+                        checkout,
+                        rec_token=rec_token,
+                        repay_url=self._repay_url_from_payload(payload),
                     )
                     payment.subscription_id = subscription.id
             elif subscription is not None:
-                self._extend_subscription(subscription, rec_token=rec_token)
+                self._extend_subscription(
+                    subscription,
+                    rec_token=rec_token,
+                    repay_url=self._repay_url_from_payload(payload),
+                )
                 payment.subscription_id = subscription.id
             else:
                 # The callback is genuine, but it cannot be matched. Keeping the payment
@@ -346,6 +379,7 @@ class SubscriptionService:
         checkout: CheckoutSession,
         *,
         rec_token: str | None = None,
+        repay_url: str | None = None,
     ) -> Subscription:
         if checkout.user_id is None:
             raise ValueError("Cannot activate an unclaimed checkout")
@@ -374,6 +408,7 @@ class SubscriptionService:
             ),
             provider_subscription_id=checkout.order_reference,
             provider_rec_token=rec_token,
+            provider_repay_url=repay_url,
         )
         session.add(subscription)
         checkout.status = CheckoutStatus.CLAIMED
@@ -382,7 +417,12 @@ class SubscriptionService:
         return subscription
 
     @staticmethod
-    def _extend_subscription(subscription: Subscription, *, rec_token: str | None = None) -> None:
+    def _extend_subscription(
+        subscription: Subscription,
+        *,
+        rec_token: str | None = None,
+        repay_url: str | None = None,
+    ) -> None:
         now = utc_now()
         base = as_utc(subscription.current_period_end) if subscription.current_period_end else now
         if base < now:
@@ -394,8 +434,41 @@ class SubscriptionService:
         )
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.cancel_at_period_end = False
+        subscription.payment_failed_at = None
+        subscription.payment_failure_reason = None
+        subscription.payment_failed_user_notified_at = None
+        subscription.grace_reminder_notified_at = None
+        subscription.access_revoked_at = None
+        subscription.access_revoked_notified_at = None
         if rec_token:
             subscription.provider_rec_token = rec_token
+        if repay_url:
+            subscription.provider_repay_url = repay_url
+
+    @classmethod
+    def _update_repay_url(
+        cls,
+        subscription: Subscription,
+        payload: dict[str, Any],
+    ) -> None:
+        repay_url = cls._repay_url_from_payload(payload)
+        if repay_url:
+            subscription.provider_repay_url = repay_url
+
+    @staticmethod
+    def _repay_url_from_payload(payload: dict[str, Any]) -> str | None:
+        value = payload.get("repayUrl")
+        if not isinstance(value, str) or len(value) > 2048:
+            return None
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme.casefold() != "https"
+            or not hostname
+            or (hostname != "wayforpay.com" and not hostname.endswith(".wayforpay.com"))
+        ):
+            return None
+        return value
 
     @staticmethod
     async def _attach_referrer_from_checkout(

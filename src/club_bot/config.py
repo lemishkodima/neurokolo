@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     invite_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
     payment_grace_period_hours: int = Field(default=24, ge=0, le=168)
+    payment_grace_reminder_hours_before: int = Field(default=2, ge=1, le=24)
     worker_interval_seconds: int = Field(default=60, ge=10, le=3600)
     broadcast_batch_size: int = Field(default=25, ge=1, le=100)
 

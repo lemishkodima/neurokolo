@@ -93,6 +93,7 @@ async def test_expired_subscription_is_removed_from_all_resources(tmp_path: Path
         stored = await session.get(Subscription, subscription.id)
         stored_membership = await session.get(ResourceMembership, membership.id)
         assert stored is not None and stored.status == SubscriptionStatus.EXPIRED
+        assert stored.access_revoked_at is not None
         assert stored_membership is not None
         assert stored_membership.status == MembershipStatus.REVOKED
 
