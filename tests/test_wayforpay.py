@@ -72,3 +72,24 @@ def test_callback_signature_is_verified(client: WayForPayClient) -> None:
     payload["merchantSignature"] = "invalid"
     with pytest.raises(InvalidWayForPaySignature):
         client.verify_callback(payload)
+
+
+async def test_suspend_is_idempotent_when_recurring_rule_is_absent() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/regularApi"
+        payload = request.read().decode()
+        assert '"requestType":"SUSPEND"' in payload
+        assert '"orderReference":"CLUB-1"' in payload
+        return httpx.Response(200, json={"reasonCode": 4102, "reason": "Rule is not found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = WayForPayClient(
+            merchant_account="merchant",
+            merchant_domain="example.com",
+            secret_key="secret",
+            merchant_password="password",
+            api_url="https://api.example.test/regularApi",
+            checkout_url="https://secure.example.test/pay",
+            http_client=http_client,
+        )
+        await client.suspend_recurring("CLUB-1")

@@ -208,6 +208,10 @@ async def confirm_cancel(
         await callback.answer("Активної підписки немає", show_alert=True)
         return
     except WayForPayError:
+        logger.exception(
+            "WayForPay could not cancel the subscription for Telegram user %s",
+            callback.from_user.id,
+        )
         await callback.answer(
             "Не вдалося зв’язатися з оплатою. Спробуйте пізніше.", show_alert=True
         )

@@ -313,6 +313,10 @@ period end + grace period → expired → removed from all plan resources
 WayForPay is the source of payment events. The database is the source of entitlement state.
 Telegram membership is reconciled from that state by the worker.
 
+Cancellation treats WayForPay `4102 / Rule is not found` as an idempotent success:
+an absent recurring rule is already unable to charge again, while the paid entitlement
+still remains available until its recorded period end.
+
 For a failed recurring payment the bot immediately warns the member and production admins.
 When WayForPay supplies the signed transaction's `repayUrl`, the member gets a
 `Повторити оплату` button for that same recurring payment. The worker sends one reminder

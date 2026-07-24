@@ -157,7 +157,10 @@ class WayForPayClient:
         )
         response.raise_for_status()
         data = response.json()
-        if int(data.get("reasonCode", 0)) != 4100:
+        # SUSPEND is idempotent from the application's point of view. A missing
+        # rule cannot produce another recurring charge, so it is already in the
+        # desired terminal state.
+        if int(data.get("reasonCode", 0)) not in (4100, 4102):
             raise WayForPayError(str(data.get("reason", "WayForPay rejected SUSPEND")))
 
     async def resume_recurring(self, order_reference: str) -> None:

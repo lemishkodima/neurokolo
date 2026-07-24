@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc9", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc10", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
