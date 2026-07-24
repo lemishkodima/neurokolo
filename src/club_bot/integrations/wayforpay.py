@@ -62,6 +62,7 @@ class WayForPayClient:
         service_url: str,
         return_url: str,
         date_next: datetime,
+        regular_count: int,
         regular_mode: str = "monthly",
         email: str | None = None,
         phone: str | None = None,
@@ -106,6 +107,7 @@ class WayForPayClient:
             "regularAmount": amount_text,
             "regularOn": 1,
             "dateNext": date_next.strftime("%d.%m.%Y"),
+            "regularCount": regular_count,
             "defaultPaymentSystem": "card",
         }
         if email:

@@ -159,13 +159,26 @@ async def subscription_status(
         if subscription.current_period_end
         else "—"
     )
-    renewal = "вимкнено" if subscription.cancel_at_period_end else "увімкнено"
+    renewal = "увімкнено" if subscription.auto_renew_enabled else "вимкнено"
+    recurring_details = {
+        "active": "підтверджено WayForPay",
+        "pending": "перевіряється",
+        "created": "очікує активації WayForPay",
+        "confirmed": "очікує активації WayForPay",
+        "missing": "регулярний платіж не створено",
+        "check_failed": "не вдалося перевірити",
+        "suspended": "вимкнено",
+        "removed": "видалено",
+        "completed": "завершено",
+        "not_applicable": "не застосовується",
+    }.get(subscription.provider_recurring_status or "", "не підтверджено")
     await message.answer(
         f"<b>Тариф:</b> {escape(subscription.plan_name)}\n"
         f"<b>Термін:</b> {billing_period_label(subscription.billing_months)}\n"
         f"<b>Статус підписки:</b> {escape(subscription.status)}\n"
         f"<b>Доступ до:</b> {paid_until}\n"
-        f"<b>Автопродовження:</b> {renewal}"
+        f"<b>Автопродовження:</b> {renewal}\n"
+        f"<b>Статус WayForPay:</b> {recurring_details}"
     )
 
 

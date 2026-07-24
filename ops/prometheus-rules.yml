@@ -37,3 +37,11 @@ groups:
           severity: warning
         annotations:
           summary: Payment audit metrics cannot query PostgreSQL
+
+      - alert: NeurokoloRecurringRuleMissing
+        expr: neurokolo_unverified_active_recurring_subscriptions > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A paid subscription has no verified Active WayForPay recurring rule

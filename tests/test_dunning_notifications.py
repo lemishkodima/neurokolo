@@ -136,3 +136,58 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         assert stored.access_revoked_notified_at is not None
 
     await engine.dispose()
+
+
+async def test_missing_recurring_rule_sends_one_critical_admin_alert(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'recurring-alert.db'}")
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    now = utc_now()
+    async with session_factory() as session, session.begin():
+        user = User(
+            telegram_id=777,
+            username="member",
+            first_name="Member",
+            referral_code="MEMBER777",
+        )
+        plan = Plan(code="base", name="Base", price=990, currency="UAH")
+        session.add_all([user, plan])
+        await session.flush()
+        session.add(
+            Subscription(
+                user_id=user.id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE,
+                current_period_start=now,
+                current_period_end=now + timedelta(days=30),
+                billing_amount=990,
+                billing_currency="UAH",
+                billing_months=1,
+                provider="wayforpay",
+                provider_subscription_id="CLUB-MISSING-RULE",
+                provider_recurring_status="missing",
+                provider_recurring_reason="Rule is not found",
+            )
+        )
+
+    bot: Any = FakeBot()
+    service = SubscriptionNotificationService(
+        bot,
+        FakeAccessService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        session_factory,
+        AdminService(session_factory, [900]),
+    )
+
+    assert await service.send_recurring_rule_alert("CLUB-MISSING-RULE", "missing") is True
+    assert await service.send_recurring_rule_alert("CLUB-MISSING-RULE", "missing") is False
+    assert len(bot.messages) == 1
+    assert bot.messages[0][0] == 900
+    assert "Approved-платіж без активної регулярки" in bot.messages[0][1]
+    assert "Rule is not found" in bot.messages[0][1]
+
+    await engine.dispose()

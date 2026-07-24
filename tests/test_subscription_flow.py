@@ -17,6 +17,7 @@ from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import (
     CheckoutStatus,
     MembershipStatus,
+    RecurringStatus,
     ReferralStatus,
     ResourceType,
     SubscriptionStatus,
@@ -32,6 +33,7 @@ from club_bot.models import (
     ResourceMembership,
     Subscription,
     TelegramResource,
+    User,
 )
 from club_bot.services.access import AccessService, ResourceInvite
 from club_bot.services.subscription_notifications import SubscriptionNotificationService
@@ -58,6 +60,12 @@ async def services(
 
     async def provider_handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/regularApi"
+        payload = request.read().decode()
+        if '"requestType":"STATUS"' in payload:
+            return httpx.Response(
+                200,
+                json={"reasonCode": 4100, "reason": "Ok", "status": "Active"},
+            )
         return httpx.Response(200, json={"reasonCode": 4100, "reason": "Ok"})
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(provider_handler))
@@ -265,6 +273,16 @@ async def test_personal_checkout_activates_without_manual_claim(
     subscription = await subscriptions.current_for_telegram_user(501)
     assert subscription is not None
     assert subscription.status == SubscriptionStatus.ACTIVE.value
+    assert subscription.auto_renew_enabled is False
+    assert subscription.provider_recurring_status == RecurringStatus.PENDING.value
+
+    recurring = await subscriptions.verify_recurring_for_order(checkout.order_reference)
+    assert recurring is not None
+    assert recurring.status == RecurringStatus.ACTIVE
+    subscription = await subscriptions.current_for_telegram_user(501)
+    assert subscription is not None
+    assert subscription.auto_renew_enabled is True
+    assert subscription.provider_recurring_status == RecurringStatus.ACTIVE.value
 
     async with session_factory() as session:
         stored_checkout = await session.scalar(
@@ -315,6 +333,53 @@ async def test_personal_checkout_activates_without_manual_claim(
         assert renewed_subscription.current_period_end == (
             renewed_subscription.current_period_start + relativedelta(months=3)
         )
+
+
+async def test_missing_recurring_rule_keeps_paid_access_but_disables_auto_renew(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    _, subscriptions, _ = services
+    now = utc_now()
+    async with session_factory() as session, session.begin():
+        plan = Plan(code="base", name="Base", price=990, currency="UAH")
+        user = User(
+            telegram_id=777,
+            username="member",
+            first_name="Member",
+            referral_code="MEMBER777",
+        )
+        session.add_all([plan, user])
+        await session.flush()
+        session.add(
+            Subscription(
+                user_id=user.id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE,
+                current_period_start=now,
+                current_period_end=now + relativedelta(months=1),
+                billing_amount=990,
+                billing_currency="UAH",
+                billing_months=1,
+                provider="wayforpay",
+                provider_subscription_id="CLUB-MISSING-RULE",
+                provider_recurring_status=RecurringStatus.PENDING.value,
+            )
+        )
+
+    subscriptions.wayforpay.recurring_status = AsyncMock(
+        return_value={"reasonCode": 4102, "reason": "Rule is not found"}
+    )
+    result = await subscriptions.verify_recurring_for_order("CLUB-MISSING-RULE")
+
+    assert result is not None
+    assert result.status == RecurringStatus.MISSING
+    view = await subscriptions.current_for_telegram_user(777)
+    assert view is not None
+    assert view.status == SubscriptionStatus.ACTIVE.value
+    assert view.auto_renew_enabled is False
+    assert view.provider_recurring_status == RecurringStatus.MISSING.value
 
 
 async def test_approved_callback_with_wrong_payment_terms_does_not_activate(
@@ -399,7 +464,10 @@ async def test_test_checkout_uses_isolated_provider_and_signature(
     )
     assert checkout.order_reference.startswith("TEST-")
     assert checkout.gateway_fields["merchantAccount"] == "test_merchant"
-    assert checkout.gateway_fields["productName"] == ["[TEST] Base"]
+    assert checkout.gateway_fields["productName"] == [
+        "[TEST] Base — підписка на 1 місяць, автопродовження"
+    ]
+    assert checkout.gateway_fields["regularCount"] == 24
 
     callback = {
         "merchantAccount": "test_merchant",

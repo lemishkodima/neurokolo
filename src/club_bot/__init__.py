@@ -1,3 +1,3 @@
 """Subscription club application."""
 
-__version__ = "0.8.0rc10"
+__version__ = "0.8.0rc11"

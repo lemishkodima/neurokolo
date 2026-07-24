@@ -256,6 +256,10 @@ The endpoint creates a checkout server-side and automatically posts the signed f
 to WayForPay, so the Telegram button reaches the provider checkout in one click.
 The technical form stays hidden during the automatic transition; a visible submit
 button remains as a fallback when JavaScript is unavailable.
+Every checkout includes a finite `regularCount` (24 by default), the recurrence mode,
+the recurring amount, and the first `dateNext`. The product name and fallback page
+also state the subscription period, amount, and next charge date so the payer can
+recognize that this is a recurring payment.
 When checkout is opened from the bot, the button contains a short-lived HMAC-signed owner token.
 The API validates it server-side and creates the checkout already bound to that Telegram user.
 After a verified `approved` WayForPay callback, the subscription is activated and the bot
@@ -313,6 +317,14 @@ period end + grace period → expired → removed from all plan resources
 WayForPay is the source of payment events. The database is the source of entitlement state.
 Telegram membership is reconciled from that state by the worker.
 
+An `Approved` callback grants only the paid entitlement. Immediately afterward the API calls
+WayForPay `regularApi STATUS`; the bot reports auto-renewal as enabled only for the provider
+state `Active`. `Created`, `Confirmed`, `Suspended`, `Removed`, `Completed`, a failed STATUS
+request, or `4102 / Rule is not found` all keep auto-renewal disabled without shortening the
+already-paid period. A missing/non-active rule sends a one-time critical Telegram alert to
+administrators, is rechecked by the worker, and is exposed through the
+`neurokolo_unverified_active_recurring_subscriptions` Prometheus metric.
+
 Cancellation treats WayForPay `4102 / Rule is not found` as an idempotent success:
 an absent recurring rule is already unable to charge again, while the paid entitlement
 still remains available until its recorded period end.
@@ -345,6 +357,8 @@ clears all dunning state, so old reminders cannot be sent.
   sends the one-time reminder (default: `2`).
 - Back up PostgreSQL and monitor unmatched approved payments in the `payments` table.
 - Use one worker replica unless a distributed scheduler and explicit job-claiming state are added.
+- `WAYFORPAY_REGULAR_COUNT` controls the finite number of payments in newly created rules
+  (default `24`); `RECURRING_STATUS_RECHECK_MINUTES` controls provider STATUS rechecks.
 
 Production startup:
 

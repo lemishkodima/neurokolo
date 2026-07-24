@@ -191,6 +191,70 @@ class SubscriptionNotificationService:
                 delivered += 1
         return delivered
 
+    async def send_recurring_rule_alert(
+        self,
+        order_reference: str,
+        recurring_status: str,
+    ) -> bool:
+        if self.session_factory is None or self.admin_service is None:
+            return False
+        async with self.session_factory() as session, session.begin():
+            subscription = await session.scalar(
+                select(Subscription)
+                .options(selectinload(Subscription.user), selectinload(Subscription.plan))
+                .where(Subscription.provider_subscription_id == order_reference)
+                .with_for_update()
+            )
+            if (
+                subscription is None
+                or subscription.provider != "wayforpay"
+                or subscription.provider_recurring_status != recurring_status
+                or subscription.provider_recurring_alerted_at is not None
+                or recurring_status in {"active", "not_applicable"}
+            ):
+                return False
+            subscription.provider_recurring_alerted_at = utc_now()
+            telegram_id = int(subscription.user.telegram_id)
+            username = subscription.user.username
+            plan_name = subscription.plan.name
+            amount = Decimal(subscription.billing_amount)
+            currency = subscription.billing_currency
+            reason = subscription.provider_recurring_reason
+
+        username_text = f"@{escape(username)}" if username else "немає"
+        text = (
+            "🚨 <b>Approved-платіж без активної регулярки</b>\n\n"
+            f"Користувач: <code>{telegram_id}</code> ({username_text})\n"
+            f"Тариф: {escape(plan_name)}\n"
+            f"Сума: {amount:.2f} {escape(currency)}\n"
+            f"Order reference: <code>{escape(order_reference)}</code>\n"
+            f"Recurring STATUS: <b>{escape(recurring_status)}</b>\n"
+            f"Причина: {escape(reason or 'WayForPay не вказав причину')}\n\n"
+            "Оплачений доступ активний, але наступне автоматичне списання "
+            "не підтверджене WayForPay."
+        )
+        delivered = False
+        for admin_id, _ in await self.admin_service.list_admins():
+            try:
+                await self.bot.send_message(admin_id, text, reply_markup=None)
+                delivered = True
+            except TelegramAPIError:
+                logger.exception(
+                    "Could not notify admin %s about recurring rule %s",
+                    admin_id,
+                    order_reference,
+                )
+        if not delivered:
+            async with self.session_factory() as session, session.begin():
+                subscription = await session.scalar(
+                    select(Subscription)
+                    .where(Subscription.provider_subscription_id == order_reference)
+                    .with_for_update()
+                )
+                if subscription is not None:
+                    subscription.provider_recurring_alerted_at = None
+        return delivered
+
     async def send_due_grace_reminders(self, *, limit: int = 100) -> int:
         if self.session_factory is None or self.grace_period_hours <= 0:
             return 0

@@ -29,3 +29,5 @@ class SubscriptionView(BaseModel):
     status: str
     current_period_end: datetime | None
     cancel_at_period_end: bool
+    auto_renew_enabled: bool
+    provider_recurring_status: str | None

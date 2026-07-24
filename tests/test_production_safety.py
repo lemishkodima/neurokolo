@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from club_bot.api import create_app
 from club_bot.config import Settings
 from club_bot.db import create_engine, create_session_factory
-from club_bot.domain.enums import PaymentStatus
+from club_bot.domain.enums import PaymentStatus, RecurringStatus
 from club_bot.models import Base, LandingTemplate, Payment
 from club_bot.schemas import CheckoutResponse
 from club_bot.services.checkout_links import create_personal_checkout_token
@@ -129,6 +129,9 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
             "productCount": [1],
             "productPrice": ["990.00"],
             "returnUrl": "https://example.test/club",
+            "regularMode": "monthly",
+            "dateNext": "24.08.2026",
+            "regularCount": 24,
         },
         expires_at=datetime.now(UTC),
     )
@@ -163,6 +166,9 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
     assert "<noscript><style>body { visibility: visible; }</style></noscript>" in payment_page.text
     assert 'name="productName[]"' in payment_page.text
     assert "990.00 UAH" in payment_page.text
+    assert "щомісяця" in payment_page.text
+    assert "24.08.2026" in payment_page.text
+    assert "Кількість платежів за правилом" in payment_page.text
     assert (
         "https://api.example.test/checkout/complete"
         f"?token={checkout.checkout_token}" in payment_page.text
@@ -263,20 +269,29 @@ async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> 
 
 async def test_approved_personal_checkout_callback_sends_activation_once() -> None:
     settings = Settings(**settings_values())
+    recurring_result = SimpleNamespace(
+        status=RecurringStatus.ACTIVE,
+        requires_alert=False,
+    )
     subscription_service = SimpleNamespace(
         verify_callback=Mock(),
         is_initial_checkout_callback=AsyncMock(return_value=True),
         process_callback=AsyncMock(side_effect=[True, False]),
         checkout_owner_telegram_id=AsyncMock(return_value=501),
+        verify_recurring_for_order=AsyncMock(return_value=recurring_result),
         callback_response=Mock(
             return_value={"orderReference": "CLUB-personal", "status": "accept"}
         ),
     )
     send_activated = AsyncMock(return_value=True)
+    send_recurring_rule_alert = AsyncMock(return_value=False)
     app = create_app(settings)
     app.state.container = SimpleNamespace(
         subscription_service=subscription_service,
-        subscription_notification_service=SimpleNamespace(send_activated=send_activated),
+        subscription_notification_service=SimpleNamespace(
+            send_activated=send_activated,
+            send_recurring_rule_alert=send_recurring_rule_alert,
+        ),
     )
     transport = httpx.ASGITransport(app=app)
     callback = {
@@ -291,6 +306,10 @@ async def test_approved_personal_checkout_callback_sends_activation_once() -> No
     assert first.status_code == 200
     assert duplicate.status_code == 200
     send_activated.assert_awaited_once_with(501)
+    subscription_service.verify_recurring_for_order.assert_awaited_once_with(
+        "CLUB-personal"
+    )
+    send_recurring_rule_alert.assert_not_awaited()
 
 
 async def test_public_landing_renders_safe_values_and_proxies_bot_avatar() -> None:

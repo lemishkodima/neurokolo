@@ -16,6 +16,19 @@ class PaymentStatus(StrEnum):
     REFUNDED = "refunded"
 
 
+class RecurringStatus(StrEnum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    MISSING = "missing"
+    CREATED = "created"
+    CONFIRMED = "confirmed"
+    SUSPENDED = "suspended"
+    REMOVED = "removed"
+    COMPLETED = "completed"
+    CHECK_FAILED = "check_failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class CheckoutStatus(StrEnum):
     CREATED = "created"
     PAID = "paid"

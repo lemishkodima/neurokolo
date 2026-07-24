@@ -50,6 +50,8 @@ WayForPay callback завжди потребує публічної адреси
 - Checkout і subscription snapshot-ять суму, валюту й період. WayForPay recurrence,
   перше `dateNext`, початковий entitlement та кожне renewal використовують той самий
   зафіксований інтервал.
+- Production checkout передає `regularCount` (типово 24) разом із сумою,
+  періодичністю та датою наступного списання.
 - Тариф складається з довільного набору Telegram-каналів і supergroup/forum-груп.
 - Після підтвердженої оплати бот надсилає повідомлення про активну підписку.
 - Під повідомленням створюються персональні invite-кнопки з діамантом для кожного
@@ -67,6 +69,14 @@ WayForPay callback завжди потребує публічної адреси
 - Кнопка скасування викликає WayForPay `SUSPEND`, але entitlement діє до
   `current_period_end`. Відповідь WayForPay `4102 / Rule is not found` вважається
   ідемпотентним успіхом: регулярного правила вже немає і повторне списання неможливе.
+- `Approved` активує оплачений entitlement, але не є доказом активної регулярки.
+  Одразу після callback виконується `regularApi STATUS`; автопродовження в UI
+  вважається увімкненим лише для відповіді WayForPay `Active`. Інші стани,
+  помилка STATUS або `4102` залишають оплачений доступ, але показують
+  автопродовження вимкненим і створюють критичний alert адміністраторам.
+- Worker повторно перевіряє непідтверджені production-правила. Prometheus-метрика
+  `neurokolo_unverified_active_recurring_subscriptions` контролює оплачений доступ
+  без підтвердженого `Active` rule.
 - Після закінчення entitlement worker забирає доступ у Telegram.
 - Для невдалого повторного платежу subscription переходить у `past_due`: користувач
   одразу отримує попередження та безпечну кнопку `repayUrl` для тієї самої
@@ -139,7 +149,8 @@ WayForPay callback завжди потребує публічної адреси
    WayForPay; видима кнопка залишається fallback для браузерів без JavaScript.
 5. WayForPay викликає `POST /webhooks/wayforpay`.
 6. Callback приймається тільки після перевірки HMAC-MD5.
-7. Approved-платіж активує/продовжує підписку.
+7. Approved-платіж активує/продовжує оплачений entitlement; окремий STATUS-запит
+   підтверджує або спростовує автопродовження.
 8. Для персонального checkout підписка активується одразу в callback, а бот
    автоматично надсилає підтвердження та персональні invite-кнопки.
 9. `GET` або provider `POST` на `/checkout/complete` є інформаційним і не видає
@@ -296,7 +307,8 @@ NEUROKOLO_VENV=/Users/mac/Library/Caches/neurokolo/venv
 - Caddy автоматично термінує HTTPS на 80/443.
 - Секрети монтуються файлами з `secrets/`, а не потрапляють до Docker build context.
 - Backup-контейнер щодня створює dump і відновлює його в тимчасову БД для перевірки.
-- Prometheus збирає API-метрики й контролює unmatched approved payments.
+- Prometheus збирає API-метрики й контролює unmatched approved payments та
+  production-підписки без підтвердженого `Active` recurring rule.
 - Python-залежності й базові Docker images зафіксовані lock/hash/digest.
 - Production-конфігурація fail-fast відхиляє placeholder-домени та dev credentials.
 - Вбудований checkout рендерить підписану WayForPay-форму server-side, автоматично

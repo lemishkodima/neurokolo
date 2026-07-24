@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,7 @@ from club_bot.domain.billing import add_billing_months, wayforpay_regular_mode
 from club_bot.domain.enums import (
     CheckoutStatus,
     PaymentStatus,
+    RecurringStatus,
     ReferralStatus,
     SubscriptionStatus,
 )
@@ -56,6 +57,19 @@ class ClaimResult:
     subscription: Subscription | None
 
 
+@dataclass(frozen=True)
+class RecurringAuditResult:
+    order_reference: str
+    status: RecurringStatus
+
+    @property
+    def requires_alert(self) -> bool:
+        return self.status not in {
+            RecurringStatus.ACTIVE,
+            RecurringStatus.NOT_APPLICABLE,
+        }
+
+
 class SubscriptionService:
     def __init__(
         self,
@@ -66,6 +80,7 @@ class SubscriptionService:
         bot_username: str,
         service_url: str,
         default_return_url: str,
+        regular_count: int = 24,
     ) -> None:
         self.session_factory = session_factory
         self.wayforpay = wayforpay
@@ -73,6 +88,7 @@ class SubscriptionService:
         self.bot_username = bot_username
         self.service_url = service_url
         self.default_return_url = default_return_url
+        self.regular_count = regular_count
 
     async def create_checkout(
         self,
@@ -116,15 +132,26 @@ class SubscriptionService:
             if user is not None:
                 await self._attach_referrer_from_checkout(session, user, referral_code)
 
+            next_payment_at = add_billing_months(now, plan.billing_months)
+            period_label = (
+                f"{plan.billing_months} місяць"
+                if plan.billing_months == 1
+                else f"{plan.billing_months} місяців"
+            )
             fields = provider.build_purchase_payload(
                 order_reference=order_reference,
                 order_date=int(now.timestamp()),
                 amount=plan.price,
                 currency=plan.currency,
-                product_name=f"[TEST] {plan.name}" if test_mode else plan.name,
+                product_name=(
+                    f"[TEST] {plan.name} — підписка на {period_label}, автопродовження"
+                    if test_mode
+                    else f"{plan.name} — підписка на {period_label}, автопродовження"
+                ),
                 service_url=self.service_url,
                 return_url=return_url or self.default_return_url,
-                date_next=add_billing_months(now, plan.billing_months),
+                date_next=next_payment_at,
+                regular_count=self.regular_count,
                 regular_mode=wayforpay_regular_mode(plan.billing_months),
                 email=email,
                 phone=phone,
@@ -326,6 +353,12 @@ class SubscriptionService:
                 status=subscription.status.value,
                 current_period_end=subscription.current_period_end,
                 cancel_at_period_end=subscription.cancel_at_period_end,
+                auto_renew_enabled=(
+                    not subscription.cancel_at_period_end
+                    and subscription.provider_recurring_status
+                    == RecurringStatus.ACTIVE.value
+                ),
+                provider_recurring_status=subscription.provider_recurring_status,
             )
 
     async def cancel_for_telegram_user(self, telegram_id: int) -> SubscriptionView:
@@ -356,13 +389,108 @@ class SubscriptionService:
                 raise SubscriptionNotFoundError
             subscription.cancel_at_period_end = True
             subscription.canceled_at = utc_now()
+            subscription.provider_recurring_status = (
+                RecurringStatus.NOT_APPLICABLE.value
+                if test_subscription
+                else RecurringStatus.SUSPENDED.value
+            )
+            subscription.provider_recurring_checked_at = utc_now()
             return SubscriptionView(
                 plan_name=subscription.plan.name,
                 billing_months=subscription.billing_months,
                 status=subscription.status.value,
                 current_period_end=subscription.current_period_end,
                 cancel_at_period_end=True,
+                auto_renew_enabled=False,
+                provider_recurring_status=subscription.provider_recurring_status,
             )
+
+    async def verify_recurring_for_order(
+        self,
+        order_reference: str,
+    ) -> RecurringAuditResult | None:
+        async with self.session_factory() as session:
+            subscription = await session.scalar(
+                select(Subscription).where(
+                    Subscription.provider_subscription_id == order_reference
+                )
+            )
+            if subscription is None:
+                return None
+            subscription_id = subscription.id
+            provider = subscription.provider
+
+        if provider != "wayforpay":
+            result = RecurringAuditResult(
+                order_reference=order_reference,
+                status=RecurringStatus.NOT_APPLICABLE,
+            )
+            reason = "Test subscriptions do not create a production recurring rule"
+        else:
+            try:
+                data = await self.wayforpay.recurring_status(order_reference)
+            except Exception as error:
+                result = RecurringAuditResult(
+                    order_reference=order_reference,
+                    status=RecurringStatus.CHECK_FAILED,
+                )
+                reason = f"{type(error).__name__}: recurring STATUS request failed"
+            else:
+                result, reason = self._recurring_result(order_reference, data)
+
+        async with self.session_factory() as session, session.begin():
+            subscription = await session.get(Subscription, subscription_id, with_for_update=True)
+            if subscription is None:
+                return None
+            subscription.provider_recurring_status = result.status.value
+            subscription.provider_recurring_checked_at = utc_now()
+            subscription.provider_recurring_reason = reason[:1000]
+            if result.status == RecurringStatus.ACTIVE:
+                subscription.provider_recurring_alerted_at = None
+        return result
+
+    async def audit_unverified_recurring_rules(
+        self,
+        *,
+        recheck_minutes: int,
+        limit: int = 5,
+    ) -> list[RecurringAuditResult]:
+        cutoff = utc_now() - timedelta(minutes=recheck_minutes)
+        async with self.session_factory() as session:
+            order_references = list(
+                (
+                    await session.scalars(
+                        select(Subscription.provider_subscription_id)
+                        .where(
+                            Subscription.provider == "wayforpay",
+                            Subscription.provider_subscription_id.is_not(None),
+                            Subscription.status.in_(
+                                [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]
+                            ),
+                            Subscription.cancel_at_period_end.is_(False),
+                            or_(
+                                Subscription.provider_recurring_status.is_(None),
+                                Subscription.provider_recurring_status
+                                != RecurringStatus.ACTIVE.value,
+                            ),
+                            or_(
+                                Subscription.provider_recurring_checked_at.is_(None),
+                                Subscription.provider_recurring_checked_at <= cutoff,
+                            ),
+                        )
+                        .order_by(Subscription.provider_recurring_checked_at.asc().nullsfirst())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        results: list[RecurringAuditResult] = []
+        for order_reference in order_references:
+            if order_reference is None:
+                continue
+            result = await self.verify_recurring_for_order(order_reference)
+            if result is not None:
+                results.append(result)
+        return results
 
     def verify_callback(self, payload: dict[str, Any]) -> None:
         order_reference = str(payload.get("orderReference", ""))
@@ -410,6 +538,11 @@ class SubscriptionService:
             provider_subscription_id=checkout.order_reference,
             provider_rec_token=rec_token,
             provider_repay_url=repay_url,
+            provider_recurring_status=(
+                RecurringStatus.NOT_APPLICABLE.value
+                if checkout.order_reference.startswith("TEST-")
+                else RecurringStatus.PENDING.value
+            ),
         )
         session.add(subscription)
         checkout.status = CheckoutStatus.CLAIMED
@@ -493,6 +626,36 @@ class SubscriptionService:
         ):
             return None
         return value
+
+    @staticmethod
+    def _recurring_result(
+        order_reference: str,
+        data: dict[str, Any],
+    ) -> tuple[RecurringAuditResult, str]:
+        try:
+            reason_code = int(data.get("reasonCode", 0))
+        except (TypeError, ValueError):
+            reason_code = 0
+        provider_status = str(data.get("status") or "").casefold()
+        known_statuses = {
+            item.value: item
+            for item in (
+                RecurringStatus.ACTIVE,
+                RecurringStatus.CREATED,
+                RecurringStatus.CONFIRMED,
+                RecurringStatus.SUSPENDED,
+                RecurringStatus.REMOVED,
+                RecurringStatus.COMPLETED,
+            )
+        }
+        if reason_code == 4100 and provider_status in known_statuses:
+            status = known_statuses[provider_status]
+        elif reason_code == 4102:
+            status = RecurringStatus.MISSING
+        else:
+            status = RecurringStatus.CHECK_FAILED
+        reason = str(data.get("reason") or "WayForPay returned no reason")
+        return RecurringAuditResult(order_reference=order_reference, status=status), reason
 
     @staticmethod
     async def _attach_referrer_from_checkout(

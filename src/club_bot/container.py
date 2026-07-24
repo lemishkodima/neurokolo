@@ -111,6 +111,7 @@ def build_container(settings: Settings) -> Container:
         bot_username=settings.bot_username,
         service_url=settings.wayforpay_service_url,
         default_return_url=settings.membership_site_url,
+        regular_count=settings.wayforpay_regular_count,
     )
     access_service = AccessService(
         session_factory,

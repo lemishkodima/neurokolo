@@ -140,6 +140,14 @@ class Subscription(TimestampMixin, Base):
     provider_subscription_id: Mapped[str | None] = mapped_column(String(128), unique=True)
     provider_rec_token: Mapped[str | None] = mapped_column(String(255), index=True)
     provider_repay_url: Mapped[str | None] = mapped_column(Text)
+    provider_recurring_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    provider_recurring_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    provider_recurring_reason: Mapped[str | None] = mapped_column(Text)
+    provider_recurring_alerted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     payment_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payment_failure_reason: Mapped[str | None] = mapped_column(Text)
     payment_failed_user_notified_at: Mapped[datetime | None] = mapped_column(

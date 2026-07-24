@@ -16,6 +16,23 @@ async def _worker() -> None:
         while True:
             did_broadcast_work = False
             try:
+                results = await container.subscription_service.audit_unverified_recurring_rules(
+                    recheck_minutes=settings.recurring_status_recheck_minutes
+                )
+                for result in results:
+                    if result.requires_alert:
+                        await (
+                            container.subscription_notification_service
+                            .send_recurring_rule_alert(
+                                result.order_reference,
+                                result.status.value,
+                            )
+                        )
+                if results:
+                    logger.info("Audited %s recurring payment rules", len(results))
+            except Exception:
+                logger.exception("Recurring payment audit cycle failed")
+            try:
                 count = (
                     await container.subscription_notification_service
                     .process_pending_payment_failures()

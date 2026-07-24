@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 from aiogram import Bot
 from aiogram.types import Update
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     Header,
@@ -26,14 +27,14 @@ from fastapi import Path as ApiPath
 from fastapi.responses import HTMLResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.exposition import generate_latest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 
 from club_bot.bot.setup import configure_bot
 from club_bot.config import Settings, get_settings
 from club_bot.container import Container, build_container
-from club_bot.domain.enums import PaymentStatus
+from club_bot.domain.enums import PaymentStatus, RecurringStatus, SubscriptionStatus
 from club_bot.integrations.wayforpay import InvalidWayForPaySignature
-from club_bot.models import Payment
+from club_bot.models import Payment, Subscription
 from club_bot.schemas import CheckoutCreate, CheckoutResponse
 from club_bot.services.checkout_links import (
     InvalidPersonalCheckoutToken,
@@ -134,6 +135,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "Approved test payments without a linked subscription",
         registry=metrics_registry,
     )
+    unverified_recurring_count = Gauge(
+        "neurokolo_unverified_active_recurring_subscriptions",
+        "Paid production subscriptions without a verified Active WayForPay rule",
+        registry=metrics_registry,
+    )
     avatar_cache: tuple[float, bytes, str] | None = None
 
     async def cached_bot_avatar(container: Container) -> tuple[bytes, str]:
@@ -158,7 +164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc10", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc11", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -175,6 +181,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def container_from_request(request: Request) -> Container:
         return request.app.state.container  # type: ignore[no-any-return]
+
+    async def verify_recurring_after_approved(
+        container: Container,
+        order_reference: str,
+    ) -> None:
+        result = await container.subscription_service.verify_recurring_for_order(
+            order_reference
+        )
+        if result is not None and result.requires_alert:
+            await container.subscription_notification_service.send_recurring_rule_alert(
+                order_reference,
+                result.status.value,
+            )
 
     async def require_internal_api_key(
         request: Request,
@@ -226,11 +245,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         Payment.order_reference.startswith("TEST-"),
                     )
                 )
+                recurring_count = await session.scalar(
+                    select(func.count(Subscription.id)).where(
+                        Subscription.provider == "wayforpay",
+                        Subscription.status.in_(
+                            [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]
+                        ),
+                        Subscription.cancel_at_period_end.is_(False),
+                        or_(
+                            Subscription.provider_recurring_status.is_(None),
+                            Subscription.provider_recurring_status
+                            != RecurringStatus.ACTIVE.value,
+                        ),
+                    )
+                )
             unmatched_payment_count.set(int(count or 0))
             unmatched_test_payment_count.set(int(test_count or 0))
+            unverified_recurring_count.set(int(recurring_count or 0))
         except Exception:
             unmatched_payment_count.set(-1)
             unmatched_test_payment_count.set(-1)
+            unverified_recurring_count.set(-1)
         return Response(
             content=generate_latest(metrics_registry),
             media_type=CONTENT_TYPE_LATEST,
@@ -298,6 +333,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/webhooks/wayforpay", include_in_schema=False)
     async def wayforpay_webhook(
         request: Request,
+        background_tasks: BackgroundTasks,
         container: Container = Depends(container_from_request),
     ) -> dict[str, Any]:
         payload = await request.json()
@@ -324,6 +360,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await container.subscription_notification_service.send_payment_failed(
                 order_reference,
                 rec_token,
+            )
+        if processed and approved:
+            background_tasks.add_task(
+                verify_recurring_after_approved,
+                container,
+                order_reference,
             )
         return container.subscription_service.callback_response(order_reference)
 
@@ -424,6 +466,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if test_mode
             else ""
         )
+        regular_mode = str(gateway_fields.get("regularMode", ""))
+        regular_mode_label = {
+            "monthly": "щомісяця",
+            "bimonthly": "кожні 2 місяці",
+            "quarterly": "кожні 3 місяці",
+            "halfyearly": "кожні 6 місяців",
+            "yearly": "щороку",
+        }.get(regular_mode, regular_mode)
+        next_payment = escape(str(gateway_fields.get("dateNext", "—")))
+        regular_count = escape(str(gateway_fields.get("regularCount", "—")))
+        subscription_notice = (
+            "<p><b>Регулярна підписка:</b> "
+            f"{escape(regular_mode_label)}, {amount} {currency}. "
+            f"Наступне списання: <b>{next_payment}</b>. "
+            f"Кількість платежів за правилом: <b>{regular_count}</b>. "
+            "Автопродовження можна вимкнути в Telegram-боті.</p>"
+        )
         body = f"""<!doctype html>
 <html lang="uk">
 <head>
@@ -449,6 +508,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   <main>
     <h1>Підписка Neurokolo</h1>
     {test_notice}
+    {subscription_notice}
     <p>Переходимо на захищену платіжну сторінку WayForPay…</p>
     <form id="wayforpay-checkout" method="post" action="{gateway_url}">
       {_gateway_form_inputs(gateway_fields)}
