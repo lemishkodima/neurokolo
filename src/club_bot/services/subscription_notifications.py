@@ -58,6 +58,7 @@ class SubscriptionNotificationService:
         *,
         grace_period_hours: int = 24,
         reminder_hours_before: int = 2,
+        failed_payment_admin_alerts_enabled: bool = True,
     ) -> None:
         self.bot = bot
         self.access_service = access_service
@@ -66,6 +67,7 @@ class SubscriptionNotificationService:
         self.admin_service = admin_service
         self.grace_period_hours = grace_period_hours
         self.reminder_hours_before = reminder_hours_before
+        self.failed_payment_admin_alerts_enabled = failed_payment_admin_alerts_enabled
 
     async def send_activated(self, telegram_id: int) -> bool:
         try:
@@ -147,7 +149,11 @@ class SubscriptionNotificationService:
         return delivered
 
     async def send_failed_payment_admin_alert(self, order_reference: str) -> bool:
-        if self.session_factory is None or self.admin_service is None:
+        if (
+            not self.failed_payment_admin_alerts_enabled
+            or self.session_factory is None
+            or self.admin_service is None
+        ):
             return False
         async with self.session_factory() as session:
             payment_id = await session.scalar(
@@ -168,7 +174,11 @@ class SubscriptionNotificationService:
         )
 
     async def process_pending_admin_alerts(self, *, limit: int = 100) -> int:
-        if self.session_factory is None or self.admin_service is None:
+        if (
+            not self.failed_payment_admin_alerts_enabled
+            or self.session_factory is None
+            or self.admin_service is None
+        ):
             return 0
         async with self.session_factory() as session:
             payment_ids = list(

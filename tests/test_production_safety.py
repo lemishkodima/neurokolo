@@ -61,6 +61,7 @@ def test_valid_production_settings_are_accepted() -> None:
     )
     settings = Settings(**values)
     assert settings.environment == "production"
+    assert settings.failed_payment_admin_alerts_enabled is False
 
 
 async def test_health_readiness_and_metrics_endpoints() -> None:

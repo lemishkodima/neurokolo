@@ -86,6 +86,22 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         await session.flush()
         payment_id = payment.id
 
+    disabled_bot: Any = FakeBot()
+    disabled_service = SubscriptionNotificationService(
+        disabled_bot,
+        FakeAccessService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        session_factory,
+        AdminService(session_factory, [900]),
+        failed_payment_admin_alerts_enabled=False,
+    )
+    assert await disabled_service.send_failed_payment_admin_alert("CLUB-DUNNING") is False
+    assert disabled_bot.messages == []
+    async with session_factory() as session:
+        stored_payment = await session.get(Payment, payment_id)
+        assert stored_payment is not None
+        assert stored_payment.admin_notified_at is None
+
     bot: Any = FakeBot()
     service = SubscriptionNotificationService(
         bot,
@@ -95,6 +111,7 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         AdminService(session_factory, [900]),
         grace_period_hours=24,
         reminder_hours_before=2,
+        failed_payment_admin_alerts_enabled=True,
     )
 
     assert await service.send_payment_failed("CLUB-DUNNING") is True

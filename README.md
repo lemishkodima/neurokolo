@@ -329,7 +329,9 @@ Cancellation treats WayForPay `4102 / Rule is not found` as an idempotent succes
 an absent recurring rule is already unable to charge again, while the paid entitlement
 still remains available until its recorded period end.
 
-For a failed recurring payment the bot immediately warns the member and production admins.
+For a failed recurring payment the bot immediately warns the member. Administrator alerts
+for these failures are disabled by default and can be restored with
+`FAILED_PAYMENT_ADMIN_ALERTS_ENABLED=true`.
 When WayForPay supplies the signed transaction's `repayUrl`, the member gets a
 `Повторити оплату` button for that same recurring payment. The worker sends one reminder
 before grace expires and a final message after Telegram access is revoked. Successful renewal
