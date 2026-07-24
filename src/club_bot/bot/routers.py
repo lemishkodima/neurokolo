@@ -150,36 +150,50 @@ async def subscription_status(
     if message.from_user is None:
         return
     await _send_configured_content(message, "subscription", settings_service, bot)
-    subscription = await subscription_service.current_for_telegram_user(message.from_user.id)
-    if subscription is None:
+    subscriptions = await subscription_service.current_subscriptions_for_telegram_user(
+        message.from_user.id
+    )
+    if not subscriptions:
         await message.answer("Активної підписки поки немає.")
         return
-    paid_until = (
-        subscription.current_period_end.strftime("%d.%m.%Y %H:%M")
-        if subscription.current_period_end
-        else "—"
-    )
-    renewal = "увімкнено" if subscription.auto_renew_enabled else "вимкнено"
-    recurring_details = {
-        "active": "підтверджено WayForPay",
-        "pending": "перевіряється",
-        "created": "очікує активації WayForPay",
-        "confirmed": "очікує активації WayForPay",
-        "missing": "регулярний платіж не створено",
-        "check_failed": "не вдалося перевірити",
-        "suspended": "вимкнено",
-        "removed": "видалено",
-        "completed": "завершено",
-        "not_applicable": "не застосовується",
-    }.get(subscription.provider_recurring_status or "", "не підтверджено")
-    await message.answer(
-        f"<b>Тариф:</b> {escape(subscription.plan_name)}\n"
-        f"<b>Термін:</b> {billing_period_label(subscription.billing_months)}\n"
-        f"<b>Статус підписки:</b> {escape(subscription.status)}\n"
-        f"<b>Доступ до:</b> {paid_until}\n"
-        f"<b>Автопродовження:</b> {renewal}\n"
-        f"<b>Статус WayForPay:</b> {recurring_details}"
-    )
+    blocks: list[str] = []
+    multiple = len(subscriptions) > 1
+    for index, subscription in enumerate(subscriptions, start=1):
+        paid_until = (
+            subscription.current_period_end.strftime("%d.%m.%Y %H:%M")
+            if subscription.current_period_end
+            else "—"
+        )
+        renewal = "увімкнено" if subscription.auto_renew_enabled else "вимкнено"
+        status_details = {
+            "active": "активна",
+            "past_due": "очікує повторної оплати",
+        }.get(subscription.status, subscription.status)
+        recurring_details = {
+            "active": "підтверджено WayForPay",
+            "pending": "перевіряється",
+            "created": "очікує активації WayForPay",
+            "confirmed": "очікує активації WayForPay",
+            "missing": "регулярний платіж не створено",
+            "check_failed": "не вдалося перевірити",
+            "suspended": "вимкнено",
+            "removed": "видалено",
+            "completed": "завершено",
+            "not_applicable": "не застосовується",
+        }.get(subscription.provider_recurring_status or "", "не підтверджено")
+        title = f"<b>Підписка {index}</b>\n" if multiple else "<b>Моя підписка</b>\n"
+        blocks.append(
+            f"{title}"
+            f"<b>Тариф:</b> {escape(subscription.plan_name)}\n"
+            f"<b>Вартість:</b> {subscription.billing_amount:.2f} "
+            f"{escape(subscription.billing_currency)}\n"
+            f"<b>Період:</b> {billing_period_label(subscription.billing_months)}\n"
+            f"<b>Статус:</b> {escape(status_details)}\n"
+            f"<b>Доступ до:</b> {paid_until}\n"
+            f"<b>Автопродовження:</b> {renewal}\n"
+            f"<b>Статус WayForPay:</b> {recurring_details}"
+        )
+    await message.answer("\n\n".join(blocks))
 
 
 @router.message(Command("materials"))

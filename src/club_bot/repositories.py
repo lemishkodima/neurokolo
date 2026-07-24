@@ -73,7 +73,11 @@ class SubscriptionRepository:
         self.session = session
 
     async def current_for_user(self, user_id: object) -> Subscription | None:
-        result: Subscription | None = await self.session.scalar(
+        subscriptions = await self.current_all_for_user(user_id)
+        return subscriptions[0] if subscriptions else None
+
+    async def current_all_for_user(self, user_id: object) -> list[Subscription]:
+        result = await self.session.scalars(
             select(Subscription)
             .options(selectinload(Subscription.plan).selectinload(Plan.resources))
             .where(
@@ -81,9 +85,8 @@ class SubscriptionRepository:
                 Subscription.status.in_([SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]),
             )
             .order_by(Subscription.current_period_end.desc())
-            .limit(1)
         )
-        return result
+        return list(result.all())
 
     async def by_provider_identifiers(
         self, order_reference: str, rec_token: str | None

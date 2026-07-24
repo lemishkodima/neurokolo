@@ -30,7 +30,7 @@ class MenuLabels:
 DEFAULT_SETTINGS = {
     "button_about": "Про клуб 💎",
     "button_join": "Доєднатися ✅",
-    "button_subscription": "Моя підписка 👤",
+    "button_subscription": "Моя підписка",
     "button_materials": "Матеріали 📚",
     "button_support": "Техпідтримка ⚙️",
     "club_about_text": (

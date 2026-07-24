@@ -382,6 +382,75 @@ async def test_missing_recurring_rule_keeps_paid_access_but_disables_auto_renew(
     assert view.provider_recurring_status == RecurringStatus.MISSING.value
 
 
+async def test_subscription_list_contains_each_current_tariff(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    _, subscriptions, _ = services
+    now = utc_now()
+    async with session_factory() as session, session.begin():
+        user = User(
+            telegram_id=778,
+            username="multi",
+            first_name="Multi",
+            referral_code="MEMBER778",
+        )
+        monthly = Plan(
+            code="monthly",
+            name="Місячний",
+            price=610,
+            currency="UAH",
+            billing_months=1,
+        )
+        yearly = Plan(
+            code="yearly",
+            name="Річний",
+            price=6100,
+            currency="UAH",
+            billing_months=12,
+        )
+        session.add_all([user, monthly, yearly])
+        await session.flush()
+        session.add_all(
+            [
+                Subscription(
+                    user_id=user.id,
+                    plan_id=monthly.id,
+                    status=SubscriptionStatus.ACTIVE,
+                    current_period_start=now,
+                    current_period_end=now + relativedelta(months=1),
+                    billing_amount=610,
+                    billing_currency="UAH",
+                    billing_months=1,
+                    provider="wayforpay",
+                    provider_subscription_id="CLUB-MONTHLY",
+                    provider_recurring_status=RecurringStatus.ACTIVE.value,
+                ),
+                Subscription(
+                    user_id=user.id,
+                    plan_id=yearly.id,
+                    status=SubscriptionStatus.ACTIVE,
+                    current_period_start=now,
+                    current_period_end=now + relativedelta(months=12),
+                    billing_amount=6100,
+                    billing_currency="UAH",
+                    billing_months=12,
+                    provider="wayforpay",
+                    provider_subscription_id="CLUB-YEARLY",
+                    provider_recurring_status=RecurringStatus.MISSING.value,
+                ),
+            ]
+        )
+
+    views = await subscriptions.current_subscriptions_for_telegram_user(778)
+
+    assert [view.plan_name for view in views] == ["Річний", "Місячний"]
+    assert [view.billing_amount for view in views] == [6100, 610]
+    assert [view.billing_months for view in views] == [12, 1]
+    assert [view.auto_renew_enabled for view in views] == [False, True]
+
+
 async def test_approved_callback_with_wrong_payment_terms_does_not_activate(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     services: tuple[UserService, SubscriptionService, WayForPayClient],

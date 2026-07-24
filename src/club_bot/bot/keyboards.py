@@ -12,7 +12,7 @@ def main_menu(labels: MenuLabels | None = None) -> ReplyKeyboardMarkup:
     labels = labels or MenuLabels(
         about="Про клуб 💎",
         join="Доєднатися ✅",
-        subscription="Моя підписка 👤",
+        subscription="Моя підписка",
         materials="Матеріали 📚",
         support="Техпідтримка ⚙️",
     )

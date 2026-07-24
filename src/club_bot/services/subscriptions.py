@@ -340,26 +340,19 @@ class SubscriptionService:
             return int(telegram_id) if telegram_id is not None else None
 
     async def current_for_telegram_user(self, telegram_id: int) -> SubscriptionView | None:
+        subscriptions = await self.current_subscriptions_for_telegram_user(telegram_id)
+        return subscriptions[0] if subscriptions else None
+
+    async def current_subscriptions_for_telegram_user(
+        self,
+        telegram_id: int,
+    ) -> list[SubscriptionView]:
         async with self.session_factory() as session:
             user = await UserRepository(session).by_telegram_id(telegram_id)
             if user is None:
-                return None
-            subscription = await SubscriptionRepository(session).current_for_user(user.id)
-            if subscription is None:
-                return None
-            return SubscriptionView(
-                plan_name=subscription.plan.name,
-                billing_months=subscription.billing_months,
-                status=subscription.status.value,
-                current_period_end=subscription.current_period_end,
-                cancel_at_period_end=subscription.cancel_at_period_end,
-                auto_renew_enabled=(
-                    not subscription.cancel_at_period_end
-                    and subscription.provider_recurring_status
-                    == RecurringStatus.ACTIVE.value
-                ),
-                provider_recurring_status=subscription.provider_recurring_status,
-            )
+                return []
+            subscriptions = await SubscriptionRepository(session).current_all_for_user(user.id)
+            return [self._subscription_view(subscription) for subscription in subscriptions]
 
     async def cancel_for_telegram_user(self, telegram_id: int) -> SubscriptionView:
         async with self.session_factory() as session:
@@ -397,6 +390,8 @@ class SubscriptionService:
             subscription.provider_recurring_checked_at = utc_now()
             return SubscriptionView(
                 plan_name=subscription.plan.name,
+                billing_amount=subscription.billing_amount,
+                billing_currency=subscription.billing_currency,
                 billing_months=subscription.billing_months,
                 status=subscription.status.value,
                 current_period_end=subscription.current_period_end,
@@ -404,6 +399,24 @@ class SubscriptionService:
                 auto_renew_enabled=False,
                 provider_recurring_status=subscription.provider_recurring_status,
             )
+
+    @staticmethod
+    def _subscription_view(subscription: Subscription) -> SubscriptionView:
+        return SubscriptionView(
+            plan_name=subscription.plan.name,
+            billing_amount=subscription.billing_amount,
+            billing_currency=subscription.billing_currency,
+            billing_months=subscription.billing_months,
+            status=subscription.status.value,
+            current_period_end=subscription.current_period_end,
+            cancel_at_period_end=subscription.cancel_at_period_end,
+            auto_renew_enabled=(
+                not subscription.cancel_at_period_end
+                and subscription.provider_recurring_status
+                == RecurringStatus.ACTIVE.value
+            ),
+            provider_recurring_status=subscription.provider_recurring_status,
+        )
 
     async def verify_recurring_for_order(
         self,

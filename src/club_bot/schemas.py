@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field
@@ -25,6 +26,8 @@ class CheckoutResponse(BaseModel):
 
 class SubscriptionView(BaseModel):
     plan_name: str
+    billing_amount: Decimal
+    billing_currency: str
     billing_months: int
     status: str
     current_period_end: datetime | None
