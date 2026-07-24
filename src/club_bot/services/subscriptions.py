@@ -236,6 +236,7 @@ class SubscriptionService:
                     subscription.payment_failed_at = utc_now()
                     subscription.payment_failure_reason = payment.failure_reason
                     self._update_repay_url(subscription, payload)
+                    await self._restore_repay_url(session, subscription)
                 return True
 
             expected_amount: Decimal | None = None
@@ -454,6 +455,29 @@ class SubscriptionService:
         repay_url = cls._repay_url_from_payload(payload)
         if repay_url:
             subscription.provider_repay_url = repay_url
+
+    @classmethod
+    async def _restore_repay_url(
+        cls,
+        session: AsyncSession,
+        subscription: Subscription,
+    ) -> None:
+        if subscription.provider_repay_url is not None:
+            return
+        payloads = await session.scalars(
+            select(Payment.provider_payload)
+            .where(
+                Payment.subscription_id == subscription.id,
+                Payment.status == PaymentStatus.APPROVED,
+                Payment.failure_reason.is_(None),
+            )
+            .order_by(Payment.created_at.desc())
+        )
+        for payload in payloads:
+            repay_url = cls._repay_url_from_payload(payload)
+            if repay_url:
+                subscription.provider_repay_url = repay_url
+                return
 
     @staticmethod
     def _repay_url_from_payload(payload: dict[str, Any]) -> str | None:

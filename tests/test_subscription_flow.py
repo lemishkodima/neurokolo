@@ -567,6 +567,14 @@ async def test_failed_renewal_records_dunning_and_success_clears_it(
 
     sign(callback)
     assert await subscriptions.process_callback(callback) is True
+    async with session_factory() as session, session.begin():
+        stored = await session.scalar(
+            select(Subscription).where(
+                Subscription.provider_subscription_id == checkout.order_reference
+            )
+        )
+        assert stored is not None
+        stored.provider_repay_url = None
 
     declined = dict(callback)
     declined.update(
