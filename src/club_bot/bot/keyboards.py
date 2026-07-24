@@ -19,8 +19,14 @@ def main_menu(labels: MenuLabels | None = None) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=labels.about), KeyboardButton(text=labels.join)],
-            [KeyboardButton(text=labels.materials), KeyboardButton(text=labels.support)],
-            [KeyboardButton(text="Скасувати підписку ❌")],
+            [
+                KeyboardButton(text=labels.subscription),
+                KeyboardButton(text=labels.materials),
+            ],
+            [
+                KeyboardButton(text="Скасувати підписку ❌"),
+                KeyboardButton(text=labels.support),
+            ],
         ],
         resize_keyboard=True,
         is_persistent=True,

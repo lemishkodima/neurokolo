@@ -2,7 +2,7 @@ from club_bot.bot.keyboards import main_menu
 from club_bot.services.admin import MenuLabels
 
 
-def test_main_menu_does_not_show_subscription_status_button() -> None:
+def test_main_menu_shows_subscription_status_button() -> None:
     labels = MenuLabels(
         about="Про клуб",
         join="Доєднатися",
@@ -21,8 +21,9 @@ def test_main_menu_does_not_show_subscription_status_button() -> None:
     assert button_texts == [
         "Про клуб",
         "Доєднатися",
+        "Моя підписка",
         "Матеріали",
-        "Техпідтримка",
         "Скасувати підписку ❌",
+        "Техпідтримка",
     ]
-    assert labels.subscription not in button_texts
+    assert labels.subscription in button_texts
