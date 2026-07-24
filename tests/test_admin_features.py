@@ -129,10 +129,12 @@ async def test_plan_edit_archive_restore_and_default_protection(tmp_path: Path) 
         second_plan.id,
         name="VIP Plus",
         price=Decimal("1990.00"),
+        billing_months=3,
     )
     assert updated is not None
     assert updated.name == "VIP Plus"
     assert updated.price == Decimal("1990.00")
+    assert updated.billing_months == 3
 
     assert await catalog.archive_plan(second_plan.id) is True
     assert [item.id for item in await catalog.list_plans(active=True)] == [default_plan.id]
@@ -320,6 +322,19 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
         async def menu_content(self, _action: str) -> None:
             return None
 
+    class FakeCatalogService:
+        async def list_plans(self, *, active: bool) -> list[SimpleNamespace]:
+            assert active is True
+            return [
+                SimpleNamespace(
+                    code="club",
+                    name="Клуб",
+                    price=Decimal("990"),
+                    currency="UAH",
+                    billing_months=1,
+                )
+            ]
+
     class FakeMessage:
         def __init__(self) -> None:
             self.from_user = TelegramUser(id=501, is_bot=False, first_name="Member")
@@ -339,6 +354,7 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
         message,  # type: ignore[arg-type]
         settings,  # type: ignore[arg-type]
         FakeAccessService(),  # type: ignore[arg-type]
+        FakeCatalogService(),  # type: ignore[arg-type]
         FakeSettingsService(),  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
     )
@@ -348,6 +364,79 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
     assert button_url is not None
     owner_token = parse_qs(urlsplit(button_url).query)["owner"][0]
     assert verify_personal_checkout_token(owner_token, "internal-secret") == 501
+    assert parse_qs(urlsplit(button_url).query)["plan_code"] == ["club"]
+
+
+async def test_join_offers_every_active_plan_when_multiple_are_available() -> None:
+    class FakeAccessService:
+        async def create_invites(self, _telegram_id: int) -> list[ResourceInvite]:
+            raise AccessDeniedError
+
+    class FakeCatalogService:
+        async def list_plans(self, *, active: bool) -> list[SimpleNamespace]:
+            assert active is True
+            return [
+                SimpleNamespace(
+                    code="monthly",
+                    name="Щомісячний",
+                    price=Decimal("990"),
+                    currency="UAH",
+                    billing_months=1,
+                ),
+                SimpleNamespace(
+                    code="quarter",
+                    name="Квартальний",
+                    price=Decimal("2490"),
+                    currency="UAH",
+                    billing_months=3,
+                ),
+            ]
+
+    class FakeSettingsService:
+        async def menu_content(self, _action: str) -> None:
+            return None
+
+    class FakeMessage:
+        def __init__(self) -> None:
+            self.from_user = TelegramUser(id=501, is_bot=False, first_name="Member")
+            self.chat = SimpleNamespace(id=501)
+            self.text = ""
+            self.reply_markup: object | None = None
+
+        async def answer(self, text: str, *, reply_markup: object) -> None:
+            self.text = text
+            self.reply_markup = reply_markup
+
+    settings = SimpleNamespace(
+        membership_site_url="https://api.neurokolo.com/checkout",
+        internal_api_key=SecretStr("internal-secret"),
+    )
+    message = FakeMessage()
+
+    await join(
+        message,  # type: ignore[arg-type]
+        settings,  # type: ignore[arg-type]
+        FakeAccessService(),  # type: ignore[arg-type]
+        FakeCatalogService(),  # type: ignore[arg-type]
+        FakeSettingsService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert "Оберіть тариф" in message.text
+    assert message.reply_markup is not None
+    buttons = message.reply_markup.inline_keyboard  # type: ignore[union-attr]
+    assert [row[0].text for row in buttons] == [
+        "Щомісячний · 990 UAH / 1 місяць",
+        "Квартальний · 2490 UAH / 3 місяці",
+    ]
+    urls = [row[0].url for row in buttons]
+    assert [parse_qs(urlsplit(url).query)["plan_code"][0] for url in urls if url] == [
+        "monthly",
+        "quarter",
+    ]
+    owner_tokens = [parse_qs(urlsplit(url).query)["owner"][0] for url in urls if url]
+    assert len(set(owner_tokens)) == 1
+    assert verify_personal_checkout_token(owner_tokens[0], "internal-secret") == 501
 
 
 async def test_join_with_subscription_sends_configured_content_and_invite() -> None:
@@ -405,6 +494,7 @@ async def test_join_with_subscription_sends_configured_content_and_invite() -> N
         FakeMessage(),  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
         FakeAccessService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
         FakeSettingsService(),  # type: ignore[arg-type]
         bot,  # type: ignore[arg-type]
     )
@@ -443,6 +533,7 @@ async def test_join_with_subscription_without_resources_reports_configuration() 
         message,  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
         FakeAccessService(),  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
         FakeSettingsService(),  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
     )

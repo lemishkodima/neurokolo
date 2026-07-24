@@ -4,11 +4,13 @@ from aiogram.fsm.state import State, StatesGroup
 class PlanCreateStates(StatesGroup):
     name = State()
     price = State()
+    duration = State()
 
 
 class PlanEditStates(StatesGroup):
     name = State()
     price = State()
+    duration = State()
 
 
 class AdminAddStates(StatesGroup):

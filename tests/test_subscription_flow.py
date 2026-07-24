@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from aiogram.types import User as TelegramUser
+from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -201,7 +202,16 @@ async def test_personal_checkout_activates_without_manual_claim(
     _, session_factory = database
     user_service, subscriptions, wayforpay = services
     async with session_factory() as session, session.begin():
-        session.add(Plan(code="base", name="Base", price=990, currency="UAH"))
+        plan = Plan(
+            code="base",
+            name="Base",
+            price=2490,
+            currency="UAH",
+            billing_months=3,
+        )
+        session.add(plan)
+        await session.flush()
+        plan_id = plan.id
     telegram_user = TelegramUser(id=501, is_bot=False, first_name="Personal")
     await user_service.upsert_telegram_user(telegram_user)
 
@@ -216,10 +226,15 @@ async def test_personal_checkout_activates_without_manual_claim(
     assert await subscriptions.checkout_owner_telegram_id_by_token(
         checkout.checkout_token
     ) == telegram_user.id
+    assert checkout.gateway_fields["regularMode"] == "quarterly"
+    async with session_factory() as session, session.begin():
+        stored_plan = await session.get(Plan, plan_id)
+        assert stored_plan is not None
+        stored_plan.billing_months = 1
     callback = {
         "merchantAccount": "merchant",
         "orderReference": checkout.order_reference,
-        "amount": "990.00",
+        "amount": "2490.00",
         "currency": "UAH",
         "authCode": "personal",
         "cardPan": "42****42",
@@ -257,6 +272,49 @@ async def test_personal_checkout_activates_without_manual_claim(
         )
         assert stored_checkout is not None
         assert stored_checkout.status == CheckoutStatus.CLAIMED
+        assert stored_checkout.billing_months == 3
+        stored_subscription = await session.scalar(
+            select(Subscription).where(
+                Subscription.provider_subscription_id == checkout.order_reference
+            )
+        )
+        assert stored_subscription is not None
+        assert stored_subscription.billing_months == 3
+        assert stored_subscription.current_period_start is not None
+        assert stored_subscription.current_period_end == (
+            stored_subscription.current_period_start + relativedelta(months=3)
+        )
+
+    renewal = dict(callback)
+    renewal["processingDate"] = 1_700_000_100
+    renewal["authCode"] = "personal-renewal"
+    renewal["merchantSignature"] = wayforpay._sign(
+        [
+            renewal[key]
+            for key in (
+                "merchantAccount",
+                "orderReference",
+                "amount",
+                "currency",
+                "authCode",
+                "cardPan",
+                "transactionStatus",
+                "reasonCode",
+            )
+        ]
+    )
+    assert await subscriptions.process_callback(renewal) is True
+    async with session_factory() as session:
+        renewed_subscription = await session.scalar(
+            select(Subscription).where(
+                Subscription.provider_subscription_id == checkout.order_reference
+            )
+        )
+        assert renewed_subscription is not None
+        assert renewed_subscription.current_period_start is not None
+        assert renewed_subscription.current_period_end == (
+            renewed_subscription.current_period_start + relativedelta(months=3)
+        )
 
 
 async def test_approved_callback_with_wrong_payment_terms_does_not_activate(

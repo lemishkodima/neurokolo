@@ -4,6 +4,7 @@ import uuid
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from club_bot.domain.billing import billing_period_label
 from club_bot.models import LandingTemplate, Plan, TelegramResource
 
 
@@ -47,7 +48,8 @@ def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text=(
-                    f"{'✅' if plan.is_active else '⏸'} {plan.name} · {plan.price} {plan.currency}"
+                    f"{'✅' if plan.is_active else '⏸'} {plan.name} · "
+                    f"{plan.price} {plan.currency} / {billing_period_label(plan.billing_months)}"
                 ),
                 callback_data=f"adm:plan:{plan.id}",
             )
@@ -78,7 +80,11 @@ def plan_actions_keyboard(plan: Plan, *, can_archive: bool) -> InlineKeyboardMar
             InlineKeyboardButton(
                 text="💬 Канали та групи",
                 callback_data=f"adm:plan_resources:{plan.id}",
-            )
+            ),
+            InlineKeyboardButton(
+                text="🗓 Змінити термін",
+                callback_data=f"adm:plan_duration:{plan.id}",
+            ),
         ],
     ]
     if can_archive:
@@ -98,7 +104,10 @@ def archived_plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"↩️ {plan.name} · {plan.price} {plan.currency}",
+                text=(
+                    f"↩️ {plan.name} · {plan.price} {plan.currency} / "
+                    f"{billing_period_label(plan.billing_months)}"
+                ),
                 callback_data=f"adm:plan_restore:{plan.id}",
             )
         ]

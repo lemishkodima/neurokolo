@@ -62,6 +62,7 @@ class WayForPayClient:
         service_url: str,
         return_url: str,
         date_next: datetime,
+        regular_mode: str = "monthly",
         email: str | None = None,
         phone: str | None = None,
     ) -> dict[str, Any]:
@@ -101,7 +102,7 @@ class WayForPayClient:
             "returnUrl": return_url,
             "language": "UA",
             "regularBehavior": "preset",
-            "regularMode": "monthly",
+            "regularMode": regular_mode,
             "regularAmount": amount_text,
             "regularOn": 1,
             "dateNext": date_next.strftime("%d.%m.%Y"),

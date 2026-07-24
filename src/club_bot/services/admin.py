@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from club_bot.domain.billing import validate_billing_months
 from club_bot.domain.enums import ResourceType
 from club_bot.domain.rules import as_utc, utc_now
 from club_bot.models import Admin, AppSetting, Plan, TelegramResource, plan_resources
@@ -304,7 +305,15 @@ class CatalogService:
             )
             return plan
 
-    async def create_plan(self, *, name: str, price: Decimal, currency: str = "UAH") -> Plan:
+    async def create_plan(
+        self,
+        *,
+        name: str,
+        price: Decimal,
+        billing_months: int = 1,
+        currency: str = "UAH",
+    ) -> Plan:
+        validate_billing_months(billing_months)
         async with self.session_factory() as session, session.begin():
             count = await session.scalar(select(func.count()).select_from(Plan)) or 0
             code = self.default_plan_code if count == 0 else self._plan_code(name)
@@ -315,6 +324,7 @@ class CatalogService:
                 name=name,
                 price=price,
                 currency=currency.upper(),
+                billing_months=billing_months,
                 sort_order=count,
             )
             session.add(plan)
@@ -327,7 +337,10 @@ class CatalogService:
         *,
         name: str | None = None,
         price: Decimal | None = None,
+        billing_months: int | None = None,
     ) -> Plan | None:
+        if billing_months is not None:
+            validate_billing_months(billing_months)
         async with self.session_factory() as session, session.begin():
             plan = await session.get(Plan, plan_id, with_for_update=True)
             if plan is None:
@@ -336,6 +349,8 @@ class CatalogService:
                 plan.name = name
             if price is not None:
                 plan.price = price
+            if billing_months is not None:
+                plan.billing_months = billing_months
             await session.flush()
             return plan
 

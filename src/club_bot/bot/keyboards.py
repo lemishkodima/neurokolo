@@ -36,6 +36,15 @@ def website_button(url: str) -> InlineKeyboardMarkup:
     )
 
 
+def checkout_plan_buttons(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label, url=url)]
+            for label, url in items
+        ]
+    )
+
+
 def cancel_confirmation() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

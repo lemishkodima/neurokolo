@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc6", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc7", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(
@@ -348,6 +348,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/checkout", response_class=HTMLResponse, include_in_schema=False)
     async def public_checkout(
         referral_code: str | None = Query(default=None, max_length=32),
+        plan_code: str | None = Query(
+            default=None,
+            min_length=1,
+            max_length=64,
+            pattern=r"^[A-Za-z0-9_-]+$",
+        ),
         owner: str | None = Query(
             default=None,
             min_length=20,
@@ -371,7 +377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             test_mode = await container.settings_service.payment_test_mode_active()
             checkout = await container.subscription_service.create_checkout(
-                plan_code=container.settings.default_plan_code,
+                plan_code=plan_code or container.settings.default_plan_code,
                 email=None,
                 phone=None,
                 referral_code=referral_code,
@@ -381,7 +387,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except PlanNotFoundError as error:
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if plan_code is not None
+                    else status.HTTP_503_SERVICE_UNAVAILABLE
+                ),
                 detail="Payment plan is unavailable",
             ) from error
         except CheckoutOwnerNotFoundError as error:

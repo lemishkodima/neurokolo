@@ -133,6 +133,7 @@ class Subscription(TimestampMixin, Base):
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     billing_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     billing_currency: Mapped[str] = mapped_column(String(3))
+    billing_months: Mapped[int] = mapped_column(Integer, default=1)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
     canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     provider: Mapped[str] = mapped_column(String(32), default="wayforpay")
@@ -161,6 +162,7 @@ class CheckoutSession(TimestampMixin, Base):
     phone: Mapped[str | None] = mapped_column(String(32))
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(3))
+    billing_months: Mapped[int] = mapped_column(Integer, default=1)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 

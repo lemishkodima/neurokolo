@@ -230,7 +230,10 @@ async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> 
     )
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        payment_page = await client.get("/checkout", params={"owner": owner_token})
+        payment_page = await client.get(
+            "/checkout",
+            params={"owner": owner_token, "plan_code": "quarter"},
+        )
         completion_page = await client.post(
             "/checkout/complete",
             params={"token": checkout.checkout_token},
@@ -242,7 +245,7 @@ async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> 
 
     assert payment_page.status_code == 200
     create_checkout.assert_awaited_once_with(
-        plan_code=settings.default_plan_code,
+        plan_code="quarter",
         email=None,
         phone=None,
         referral_code=None,

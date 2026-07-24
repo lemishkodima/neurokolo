@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from club_bot.config import get_settings
 from club_bot.db import create_engine, create_session_factory
+from club_bot.domain.billing import SUPPORTED_BILLING_MONTHS
 from club_bot.domain.enums import ResourceType
 from club_bot.models import Plan, TelegramResource
 
@@ -84,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--description", default="")
     plan.add_argument("--price", required=True)
     plan.add_argument("--currency", default="UAH")
-    plan.add_argument("--billing-months", type=int, default=1)
+    plan.add_argument("--billing-months", type=int, choices=SUPPORTED_BILLING_MONTHS, default=1)
     plan.set_defaults(handler=_seed_plan)
 
     resource = commands.add_parser("seed-resource")

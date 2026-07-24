@@ -10,13 +10,14 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from club_bot.domain.billing import add_billing_months, wayforpay_regular_mode
 from club_bot.domain.enums import (
     CheckoutStatus,
     PaymentStatus,
     ReferralStatus,
     SubscriptionStatus,
 )
-from club_bot.domain.rules import as_utc, generate_public_token, next_month, utc_now
+from club_bot.domain.rules import as_utc, generate_public_token, utc_now
 from club_bot.integrations.wayforpay import WayForPayClient
 from club_bot.models import CheckoutSession, Payment, Referral, Subscription, User
 from club_bot.repositories import (
@@ -107,6 +108,7 @@ class SubscriptionService:
                 phone=phone,
                 amount=plan.price,
                 currency=plan.currency,
+                billing_months=plan.billing_months,
                 expires_at=now + timedelta(hours=24),
             )
             session.add(checkout)
@@ -121,7 +123,8 @@ class SubscriptionService:
                 product_name=f"[TEST] {plan.name}" if test_mode else plan.name,
                 service_url=self.service_url,
                 return_url=return_url or self.default_return_url,
-                date_next=next_month(now),
+                date_next=add_billing_months(now, plan.billing_months),
+                regular_mode=wayforpay_regular_mode(plan.billing_months),
                 email=email,
                 phone=phone,
             )
@@ -285,6 +288,7 @@ class SubscriptionService:
                 return None
             return SubscriptionView(
                 plan_name=subscription.plan.name,
+                billing_months=subscription.billing_months,
                 status=subscription.status.value,
                 current_period_end=subscription.current_period_end,
                 cancel_at_period_end=subscription.cancel_at_period_end,
@@ -320,6 +324,7 @@ class SubscriptionService:
             subscription.canceled_at = utc_now()
             return SubscriptionView(
                 plan_name=subscription.plan.name,
+                billing_months=subscription.billing_months,
                 status=subscription.status.value,
                 current_period_end=subscription.current_period_end,
                 cancel_at_period_end=True,
@@ -358,9 +363,10 @@ class SubscriptionService:
             plan_id=checkout.plan_id,
             status=SubscriptionStatus.ACTIVE,
             current_period_start=now,
-            current_period_end=next_month(now),
+            current_period_end=add_billing_months(now, checkout.billing_months),
             billing_amount=checkout.amount,
             billing_currency=checkout.currency,
+            billing_months=checkout.billing_months,
             provider=(
                 "wayforpay_test"
                 if checkout.order_reference.startswith("TEST-")
@@ -382,7 +388,10 @@ class SubscriptionService:
         if base < now:
             base = now
         subscription.current_period_start = base
-        subscription.current_period_end = next_month(base)
+        subscription.current_period_end = add_billing_months(
+            base,
+            subscription.billing_months,
+        )
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.cancel_at_period_end = False
         if rec_token:

@@ -25,6 +25,7 @@ class CheckoutResponse(BaseModel):
 
 class SubscriptionView(BaseModel):
     plan_name: str
+    billing_months: int
     status: str
     current_period_end: datetime | None
     cancel_at_period_end: bool

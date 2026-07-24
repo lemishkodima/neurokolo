@@ -7,7 +7,7 @@ FastAPI, PostgreSQL and WayForPay recurring payments.
 
 - Telegram personal cabinet with persistent menu.
 - External WayForPay checkout-session API and signed payment callbacks.
-- Monthly recurring payment configuration.
+- Configurable 1, 2, 3, 6, or 12-month recurring payment periods.
 - Cancellation at period end through WayForPay `SUSPEND`.
 - Personal, expiring join-request links for every channel or forum included in a plan.
 - Automatic approval only when the applicant Telegram ID owns the invite and still has
@@ -16,9 +16,8 @@ FastAPI, PostgreSQL and WayForPay recurring payments.
 - Automatic post-payment confirmation with identity-bound join-request buttons immediately after
   the Telegram account and successful checkout are matched.
 - Automatic removal from all plan resources after expiration and an optional grace period.
-- Multiple plans and arbitrary plan-to-resource mappings.
-- Telegram admin panel for composing plans from channels/groups; the single-plan user flow stays
-  hidden automatically.
+- Multiple public plans and arbitrary plan-to-resource mappings. Users see a choice when at least
+  two plans are active; the single-plan choice stays hidden automatically.
 - Automatic channel and supergroup registration when the bot is added or removed, with a
   notification to every active administrator after a new resource is connected.
 - Rich-text and media-group broadcasts with previews, optional URL buttons, recipient snapshots,
@@ -30,8 +29,8 @@ FastAPI, PostgreSQL and WayForPay recurring payments.
 - Referral attribution, qualification after the first payment, and a reward ledger ready for
   bonus-month, discount, or credit rules.
 - Idempotent payment event processing and audit-friendly payment history.
-- Immutable checkout/subscription amount and currency snapshots; a signed callback with mismatched
-  payment terms is recorded for audit but never grants access.
+- Immutable checkout/subscription amount, currency, and billing-period snapshots; a signed callback
+  with mismatched payment terms is recorded for audit but never grants access.
 - Entitlement reconciliation across overlapping subscriptions, so expiration of one subscription
   cannot remove access still covered by another.
 - Separate API and worker processes so horizontal API scaling cannot run expiration work twice.
@@ -56,9 +55,10 @@ The payment provider never directly changes Telegram access. A verified callback
 subscription state; the access service derives permitted Telegram resources from the selected
 plan. This keeps provider, entitlement, and Telegram concerns separate.
 
-The initial interface does not display or ask users to choose a tariff. `DEFAULT_PLAN_CODE`
-selects the single active club offer. Multi-plan support stays internal and can be exposed later
-without changing subscription or access storage.
+The Telegram interface skips tariff selection while only one offer is active. When two or more
+offers are active, it renders a separate signed personal checkout URL for every plan. The public
+checkout validates the selected `plan_code` against active database records and always derives
+price, currency, and billing period server-side.
 
 ## Local setup
 
@@ -106,8 +106,8 @@ ID so the owner can correct an ID copied from the wrong account.
 
 The panel supports:
 
-- creating tariffs, editing their names/prices, selecting channel/group resources, and safely
-  archiving/restoring non-default tariffs;
+- creating tariffs, editing their names/prices/billing periods, selecting channel/group resources,
+  and safely archiving/restoring non-default tariffs;
 - reviewing resources captured automatically when the bot is added as an administrator;
 - creating rich-text, media, and album broadcasts for all users or active subscribers;
 - adding URL buttons to a broadcast and previewing it before queueing;
@@ -131,14 +131,17 @@ removed from every tariff, and hidden from the active resource list. All bot adm
 a notification. Historical membership records remain intact; after adding the bot back as an
 administrator, explicitly attach the resource to the required tariffs again.
 
-When the database has one active tariff, users are never asked to select it; the configured
-`DEFAULT_PLAN_CODE` is used. The tariff editor remains visible only to administrators.
+When the database has one active tariff, users are never asked to select it. With two or more
+active tariffs, `Доєднатися` shows a personal checkout button for every tariff with its name,
+price, and billing period.
 
 Tariff deletion is implemented as an archive operation. It removes the tariff from new checkout
 choices while preserving historical checkout, payment, subscription, and entitlement records.
-The `DEFAULT_PLAN_CODE` tariff cannot be archived, but its display name and price can be edited.
-Price changes apply only to newly created checkout sessions because existing checkout and
-subscription amounts are immutable snapshots.
+The `DEFAULT_PLAN_CODE` tariff cannot be archived, but its display name, price, and billing period
+can be edited. Prices are specified for the entire period. Supported periods map directly to
+WayForPay recurrence modes: 1, 2, 3, 6, or 12 months. Price and period changes apply only to newly
+created checkout sessions because existing checkout and subscription terms are immutable
+snapshots.
 
 ### User-menu content
 
@@ -223,6 +226,7 @@ club-admin seed-plan \
   --code base \
   --name "Клуб — базовий" \
   --price 990 \
+  --billing-months 1 \
   --currency UAH
 ```
 

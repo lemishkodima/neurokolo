@@ -46,6 +46,11 @@ from club_bot.bot.admin_states import (
 )
 from club_bot.bot.setup import configure_admin_commands, remove_admin_commands
 from club_bot.config import Settings
+from club_bot.domain.billing import (
+    SUPPORTED_BILLING_MONTHS,
+    billing_period_label,
+    validate_billing_months,
+)
 from club_bot.domain.enums import BroadcastTarget
 from club_bot.models import LandingTemplate, Plan
 from club_bot.services.admin import (
@@ -99,7 +104,9 @@ async def _authorized(event: Message | CallbackQuery, admin_service: AdminServic
 def _plan_details(plan: Plan) -> str:
     return (
         f"<b>{escape(plan.name)}</b>\n"
-        f"Ціна: <b>{plan.price} {plan.currency}</b> / місяць\n"
+        f"Ціна: <b>{plan.price} {plan.currency}</b> за "
+        f"<b>{billing_period_label(plan.billing_months)}</b>\n"
+        f"Автопродовження: кожні <b>{billing_period_label(plan.billing_months)}</b>\n"
         f"Ресурсів: <b>{len(plan.resources)}</b>\n"
         f"Код: <code>{escape(plan.code)}</code>\n\n"
         "Оберіть, що потрібно змінити."
@@ -209,14 +216,13 @@ async def plan_name(message: Message, admin_service: AdminService, state: FSMCon
         return
     await state.update_data(plan_name=message.text.strip())
     await state.set_state(PlanCreateStates.price)
-    await message.answer("Введіть щомісячну ціну в UAH, наприклад <code>990</code>:")
+    await message.answer("Введіть ціну за весь період у UAH, наприклад <code>990</code>:")
 
 
 @admin_router.message(PlanCreateStates.price)
 async def plan_price(
     message: Message,
     admin_service: AdminService,
-    catalog_service: CatalogService,
     state: FSMContext,
 ) -> None:
     if not await _authorized(message, admin_service) or not message.text:
@@ -228,8 +234,36 @@ async def plan_price(
     except InvalidOperation:
         await message.answer("Некоректна ціна. Введіть додатне число, наприклад 990.")
         return
+    await state.update_data(plan_price=str(price))
+    await state.set_state(PlanCreateStates.duration)
+    supported = ", ".join(str(months) for months in SUPPORTED_BILLING_MONTHS)
+    await message.answer(
+        "Введіть термін дії тарифу в місяцях.\n"
+        f"Доступні значення: <code>{supported}</code>."
+    )
+
+
+@admin_router.message(PlanCreateStates.duration)
+async def plan_duration(
+    message: Message,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        billing_months = validate_billing_months(int(message.text.strip()))
+    except ValueError:
+        supported = ", ".join(str(months) for months in SUPPORTED_BILLING_MONTHS)
+        await message.answer(f"Оберіть один із термінів: <code>{supported}</code> місяців.")
+        return
     data = await state.get_data()
-    plan = await catalog_service.create_plan(name=str(data["plan_name"]), price=price)
+    plan = await catalog_service.create_plan(
+        name=str(data["plan_name"]),
+        price=Decimal(str(data["plan_price"])),
+        billing_months=billing_months,
+    )
     await state.clear()
     await message.answer(
         f"✅ Тариф «{escape(plan.name)}» створено. Тепер виберіть для нього ресурси.",
@@ -389,7 +423,8 @@ async def edit_plan_price(
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
             f"Поточна ціна: <b>{plan.price} {plan.currency}</b>\n\n"
-            "Введіть нову щомісячну ціну в UAH:"
+            f"Поточний термін: <b>{billing_period_label(plan.billing_months)}</b>\n\n"
+            "Введіть нову ціну за весь період у UAH:"
         )
     await callback.answer()
 
@@ -421,6 +456,67 @@ async def save_plan_price(
         return
     await message.answer(
         "✅ Ціну тарифу оновлено. Нові checkout використовуватимуть нову ціну; "
+        "вже створені оплати й підписки не змінено.",
+        reply_markup=plan_actions_keyboard(
+            plan,
+            can_archive=plan.code != catalog_service.default_plan_code,
+        ),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_duration:"))
+async def edit_plan_duration(
+    callback: CallbackQuery,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan_id = uuid.UUID(callback.data.rsplit(":", 1)[1])
+    plan = await catalog_service.get_plan(plan_id)
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф не знайдено", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(selected_plan_id=str(plan_id))
+    await state.set_state(PlanEditStates.duration)
+    supported = ", ".join(str(months) for months in SUPPORTED_BILLING_MONTHS)
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Поточний термін: <b>{billing_period_label(plan.billing_months)}</b>\n\n"
+            "Введіть новий термін у місяцях.\n"
+            f"Доступні значення: <code>{supported}</code>."
+        )
+    await callback.answer()
+
+
+@admin_router.message(PlanEditStates.duration)
+async def save_plan_duration(
+    message: Message,
+    admin_service: AdminService,
+    catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    try:
+        billing_months = validate_billing_months(int(message.text.strip()))
+    except ValueError:
+        supported = ", ".join(str(months) for months in SUPPORTED_BILLING_MONTHS)
+        await message.answer(f"Оберіть один із термінів: <code>{supported}</code> місяців.")
+        return
+    data = await state.get_data()
+    plan = await catalog_service.update_plan(
+        uuid.UUID(str(data["selected_plan_id"])),
+        billing_months=billing_months,
+    )
+    await state.clear()
+    if plan is None:
+        await message.answer("Тариф не знайдено.", reply_markup=admin_menu())
+        return
+    await message.answer(
+        "✅ Термін тарифу оновлено. Він застосовуватиметься лише до нових checkout; "
         "вже створені оплати й підписки не змінено.",
         reply_markup=plan_actions_keyboard(
             plan,

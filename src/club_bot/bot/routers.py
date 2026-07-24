@@ -11,14 +11,16 @@ from aiogram.types import CallbackQuery, Message
 
 from club_bot.bot.keyboards import (
     cancel_confirmation,
+    checkout_plan_buttons,
     main_menu,
     resource_links,
     website_button,
 )
 from club_bot.config import Settings
+from club_bot.domain.billing import billing_period_label
 from club_bot.integrations.wayforpay import WayForPayError
 from club_bot.services.access import AccessDeniedError, AccessService
-from club_bot.services.admin import SettingsService
+from club_bot.services.admin import CatalogService, SettingsService
 from club_bot.services.checkout_links import (
     add_query_parameter,
     create_personal_checkout_token,
@@ -101,6 +103,7 @@ async def join(
     message: Message,
     settings: Settings,
     access_service: AccessService,
+    catalog_service: CatalogService,
     settings_service: SettingsService,
     bot: Bot,
 ) -> None:
@@ -134,20 +137,7 @@ async def join(
             await message.answer("Підписка активна, але для тарифу ще не додано каналів.")
         return
 
-    owner_token = create_personal_checkout_token(
-        message.from_user.id,
-        settings.internal_api_key.get_secret_value(),
-    )
-    checkout_url = add_query_parameter(
-        settings.membership_site_url,
-        "owner",
-        owner_token,
-    )
-    await message.answer(
-        "Оформіть підписку на клуб. Після підтвердження WayForPay бот автоматично "
-        "надішле повідомлення й персональні посилання доступу.",
-        reply_markup=website_button(checkout_url),
-    )
+    await _offer_checkout(message, settings, catalog_service)
 
 
 @router.message(Command("subscription"))
@@ -171,6 +161,8 @@ async def subscription_status(
     )
     renewal = "вимкнено" if subscription.cancel_at_period_end else "увімкнено"
     await message.answer(
+        f"<b>Тариф:</b> {escape(subscription.plan_name)}\n"
+        f"<b>Термін:</b> {billing_period_label(subscription.billing_months)}\n"
         f"<b>Статус підписки:</b> {escape(subscription.status)}\n"
         f"<b>Доступ до:</b> {paid_until}\n"
         f"<b>Автопродовження:</b> {renewal}"
@@ -267,6 +259,7 @@ async def dynamic_menu_action(
     settings_service: SettingsService,
     subscription_service: SubscriptionService,
     access_service: AccessService,
+    catalog_service: CatalogService,
     bot: Bot,
 ) -> None:
     labels = await settings_service.labels()
@@ -281,13 +274,67 @@ async def dynamic_menu_action(
         case "about":
             await about(message, settings_service, bot)
         case "join":
-            await join(message, settings, access_service, settings_service, bot)
+            await join(
+                message,
+                settings,
+                access_service,
+                catalog_service,
+                settings_service,
+                bot,
+            )
         case "subscription":
             await subscription_status(message, subscription_service, settings_service, bot)
         case "materials":
             await materials(message, settings_service, bot)
         case "support":
             await support(message, settings, settings_service, bot)
+
+
+async def _offer_checkout(
+    message: Message,
+    settings: Settings,
+    catalog_service: CatalogService,
+) -> None:
+    if message.from_user is None:
+        return
+    plans = await catalog_service.list_plans(active=True)
+    if not plans:
+        await message.answer(
+            "Наразі немає доступних тарифів. Зверніться до техпідтримки."
+        )
+        return
+    owner_token = create_personal_checkout_token(
+        message.from_user.id,
+        settings.internal_api_key.get_secret_value(),
+    )
+    checkout_options: list[tuple[str, str]] = []
+    for plan in plans:
+        checkout_url = add_query_parameter(
+            settings.membership_site_url,
+            "owner",
+            owner_token,
+        )
+        checkout_url = add_query_parameter(checkout_url, "plan_code", plan.code)
+        label = (
+            f"{plan.name} · {plan.price} {plan.currency} / "
+            f"{billing_period_label(plan.billing_months)}"
+        )
+        if len(label) > 64:
+            label = f"{label[:63]}…"
+        checkout_options.append((label, checkout_url))
+
+    if len(checkout_options) == 1:
+        await message.answer(
+            "Оформіть підписку на клуб. Після підтвердження WayForPay бот автоматично "
+            "надішле повідомлення й персональні посилання доступу.",
+            reply_markup=website_button(checkout_options[0][1]),
+        )
+        return
+    await message.answer(
+        "Оберіть тариф. Ціна вказана за весь період; після завершення цього періоду "
+        "підписка автоматично продовжується на такий самий термін.",
+        reply_markup=checkout_plan_buttons(checkout_options),
+    )
 
 
 async def _send_configured_content(

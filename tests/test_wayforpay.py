@@ -33,9 +33,10 @@ def test_purchase_payload_is_signed_and_recurring(client: WayForPayClient) -> No
         service_url="https://bot.example.com/webhooks/wayforpay",
         return_url="https://example.com/complete",
         date_next=datetime(2026, 8, 22, tzinfo=UTC),
+        regular_mode="quarterly",
     )
 
-    assert payload["regularMode"] == "monthly"
+    assert payload["regularMode"] == "quarterly"
     assert payload["regularBehavior"] == "preset"
     assert payload["regularOn"] == 1
     assert payload["dateNext"] == "22.08.2026"
