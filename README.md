@@ -120,6 +120,11 @@ supergroup. It needs permissions to create invite links, approve join requests, 
 members. If the bot was already present before this version was started, remove and re-add it once
 so Telegram emits the membership update used for automatic registration.
 
+When the bot is removed or demoted from administrator, the resource is automatically deactivated,
+removed from every tariff, and hidden from the active resource list. All bot administrators receive
+a notification. Historical membership records remain intact; after adding the bot back as an
+administrator, explicitly attach the resource to the required tariffs again.
+
 When the database has one active tariff, users are never asked to select it; the configured
 `DEFAULT_PLAN_CODE` is used. The tariff editor remains visible only to administrators.
 

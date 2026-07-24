@@ -37,6 +37,7 @@ from club_bot.models import (
     Subscription,
     TelegramResource,
     User,
+    plan_resources,
 )
 from club_bot.services.access import AccessDeniedError, ResourceInvite
 from club_bot.services.admin import (
@@ -511,6 +512,58 @@ async def test_new_channel_notifies_all_admins(tmp_path: Path) -> None:
             select(TelegramResource).where(TelegramResource.chat_id == -100777)
         )
     assert resource is not None and resource.is_active is True
+
+
+async def test_removed_admin_deactivates_resource_and_notifies_all_admins(
+    tmp_path: Path,
+) -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.messages: list[tuple[int, str]] = []
+
+        async def send_message(self, chat_id: int, text: str) -> None:
+            self.messages.append((chat_id, text))
+
+    session_factory = await _database(tmp_path)
+    admins = AdminService(session_factory, [402152266])
+    await admins.add_admin(123, added_by=402152266)
+    catalog = CatalogService(session_factory, default_plan_code="club")
+    resource = await catalog.register_resource(
+        chat_id=-100888,
+        title="Спільнота <VIP>",
+        resource_type=ResourceType.SUPERGROUP,
+        is_active=True,
+    )
+    plan = await catalog.create_plan(name="Club", price=Decimal("990"))
+    assert await catalog.toggle_plan_resource(plan.id, resource.id) is True
+    bot = FakeBot()
+    event = SimpleNamespace(
+        chat=SimpleNamespace(
+            id=-100888,
+            title="Спільнота <VIP>",
+            type=ChatType.SUPERGROUP,
+        ),
+        old_chat_member=SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR),
+        new_chat_member=SimpleNamespace(status=ChatMemberStatus.MEMBER),
+    )
+
+    await track_bot_membership(event, bot, catalog, admins)  # type: ignore[arg-type]
+
+    assert [chat_id for chat_id, _text in bot.messages] == [123, 402152266]
+    assert all("більше не адміністратор" in text for _chat_id, text in bot.messages)
+    assert all("Спільнота &lt;VIP&gt;" in text for _chat_id, text in bot.messages)
+    async with session_factory() as session:
+        stored_resource = await session.scalar(
+            select(TelegramResource).where(TelegramResource.chat_id == -100888)
+        )
+        attached_plan = await session.scalar(
+            select(plan_resources.c.plan_id).where(
+                plan_resources.c.resource_id == resource.id
+            )
+        )
+    assert stored_resource is not None and stored_resource.is_active is False
+    assert attached_plan is None
+    assert await catalog.list_resources(active=True) == []
 
 
 async def test_broadcast_queue_and_html_statistics(tmp_path: Path) -> None:

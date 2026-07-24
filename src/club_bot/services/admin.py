@@ -264,12 +264,26 @@ class CatalogService:
             await session.flush()
             return resource
 
-    async def list_resources(self) -> list[TelegramResource]:
+    async def deactivate_resource(self, chat_id: int) -> bool:
+        async with self.session_factory() as session, session.begin():
+            resource = await session.scalar(
+                select(TelegramResource).where(TelegramResource.chat_id == chat_id)
+            )
+            if resource is None:
+                return False
+            resource.is_active = False
+            await session.execute(
+                plan_resources.delete().where(plan_resources.c.resource_id == resource.id)
+            )
+            return True
+
+    async def list_resources(self, *, active: bool | None = None) -> list[TelegramResource]:
         async with self.session_factory() as session:
+            statement = select(TelegramResource)
+            if active is not None:
+                statement = statement.where(TelegramResource.is_active.is_(active))
             result = await session.scalars(
-                select(TelegramResource).order_by(
-                    TelegramResource.is_active.desc(), TelegramResource.name
-                )
+                statement.order_by(TelegramResource.is_active.desc(), TelegramResource.name)
             )
             return list(result.all())
 

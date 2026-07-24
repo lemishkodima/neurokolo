@@ -513,10 +513,10 @@ async def show_resources(
 ) -> None:
     if not await _authorized(callback, admin_service):
         return
-    resources = await catalog_service.list_resources()
-    lines = ["<b>Збережені Telegram-ресурси</b>"]
+    resources = await catalog_service.list_resources(active=True)
+    lines = ["<b>Активні Telegram-ресурси</b>"]
     lines.extend(
-        f"\n{'✅' if item.is_active else '⏸'} {escape(item.name)}\n<code>{item.chat_id}</code>"
+        f"\n✅ {escape(item.name)}\n<code>{item.chat_id}</code>"
         for item in resources
     )
     if not resources:
