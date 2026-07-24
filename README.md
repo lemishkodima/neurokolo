@@ -167,6 +167,10 @@ already-created order. A successful test callback intentionally exercises the re
 flow and can activate a Telegram subscription/invite, but does not charge real funds. Do not
 share the public checkout link while the global test window is active.
 
+The public WayForPay test merchant doesn't create a recurring-payment rule. Test subscription
+cancellation is therefore stored locally without calling `SUSPEND`; production cancellation still
+requires a successful provider `SUSPEND` before disabling the next charge.
+
 WayForPay documents its integration test merchant separately from production credentials:
 https://wiki.wayforpay.com/en/view/852472
 

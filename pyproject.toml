@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-subscription-club"
-version = "0.8.0rc4"
+version = "0.8.0rc5"
 description = "Telegram subscription club powered by aiogram and WayForPay"
 readme = "README.md"
 requires-python = ">=3.12"

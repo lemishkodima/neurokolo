@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -376,6 +377,11 @@ async def test_test_checkout_uses_isolated_provider_and_signature(
     claim = await subscriptions.claim_checkout(checkout.checkout_token, telegram_user.id)
     assert claim.subscription is not None
     assert claim.subscription.provider == "wayforpay_test"
+    suspend = AsyncMock()
+    subscriptions.test_wayforpay.suspend_recurring = suspend
+    canceled = await subscriptions.cancel_for_telegram_user(telegram_user.id)
+    assert canceled.cancel_at_period_end is True
+    suspend.assert_not_awaited()
 
     forged_with_production = dict(callback)
     forged_with_production["merchantAccount"] = production_wayforpay.merchant_account

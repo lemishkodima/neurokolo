@@ -139,6 +139,9 @@ WayForPay callback завжди потребує публічної адреси
 - callback і відповідь провайдеру підписуються клієнтом, вибраним за префіксом order reference;
 - тестовий approved callback проходить повний application-flow та може видати Telegram-доступ,
   але не списує реальні кошти.
+- скасування test-підписки виконується локально без `SUSPEND`, оскільки публічний
+  test merchant WayForPay не створює recurring rule; production-скасування, як і раніше,
+  вимагає успішного `SUSPEND`.
 
 WayForPay API adapter:
 `src/club_bot/integrations/wayforpay.py`.

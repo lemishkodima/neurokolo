@@ -299,9 +299,15 @@ class SubscriptionService:
             if subscription is None or not subscription.provider_subscription_id:
                 raise SubscriptionNotFoundError
             provider_id = subscription.provider_subscription_id
+            test_subscription = (
+                subscription.provider == "wayforpay_test" or provider_id.startswith("TEST-")
+            )
 
         # Do not hold a database transaction open during a network request.
-        await self._provider_for_order(provider_id).suspend_recurring(provider_id)
+        # The public test merchant approves checkout callbacks but doesn't create
+        # a regular-payment rule, so SUSPEND would return 4102 ("Rule is not found").
+        if not test_subscription:
+            await self.wayforpay.suspend_recurring(provider_id)
 
         async with self.session_factory() as session, session.begin():
             user = await UserRepository(session).by_telegram_id(telegram_id)
