@@ -98,6 +98,12 @@ WayForPay callbacks still require a public HTTPS URL even when Telegram uses pol
 Set the permanent owner IDs in `ADMIN_TELEGRAM_IDS` (JSON list) and restart the bot. The default is
 `[402152266]`. Then send `/admin` to the bot.
 
+Administrators added through the panel are stored in the database. Their private-chat Telegram
+command scope is configured immediately and restored from the database after every API or polling
+restart, so `/admin` appears without editing the environment. Removing an administrator also
+removes that command scope. If access is denied, the bot replies with the caller's actual Telegram
+ID so the owner can correct an ID copied from the wrong account.
+
 The panel supports:
 
 - creating tariffs, editing their names/prices, selecting channel/group resources, and safely

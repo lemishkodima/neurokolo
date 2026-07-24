@@ -148,7 +148,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         container = build_container(resolved_settings)
         app.state.container = container
-        await configure_bot(container.bot, resolved_settings.admin_telegram_ids)
+        admin_ids = [telegram_id for telegram_id, _ in await container.admin_service.list_admins()]
+        await configure_bot(container.bot, admin_ids)
         await container.bot.set_webhook(
             url=resolved_settings.telegram_webhook_url,
             secret_token=resolved_settings.bot_webhook_secret.get_secret_value(),
@@ -157,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await container.close()
 
-    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc5", lifespan=lifespan)
+    app = FastAPI(title="Telegram Subscription Club", version="0.8.0-rc6", lifespan=lifespan)
 
     @app.middleware("http")
     async def observe_requests(

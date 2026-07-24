@@ -24,7 +24,8 @@ async def _polling() -> None:
     settings = get_settings()
     container = build_container(settings)
     await container.bot.delete_webhook(drop_pending_updates=False)
-    await configure_bot(container.bot, settings.admin_telegram_ids)
+    admin_ids = [telegram_id for telegram_id, _ in await container.admin_service.list_admins()]
+    await configure_bot(container.bot, admin_ids)
     try:
         await container.dispatcher.start_polling(
             container.bot,

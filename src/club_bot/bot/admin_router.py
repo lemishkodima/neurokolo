@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from decimal import Decimal, InvalidOperation
 from html import escape
@@ -8,6 +9,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -42,6 +44,7 @@ from club_bot.bot.admin_states import (
     PlanEditStates,
     SettingEditStates,
 )
+from club_bot.bot.setup import configure_admin_commands, remove_admin_commands
 from club_bot.config import Settings
 from club_bot.domain.enums import BroadcastTarget
 from club_bot.models import LandingTemplate, Plan
@@ -66,6 +69,7 @@ from club_bot.services.telegram_content import (
 )
 
 admin_router = Router(name="admin")
+logger = logging.getLogger(__name__)
 RICH_TEXT_SETTINGS = frozenset(
     {
         "club_about_text",
@@ -84,7 +88,11 @@ async def _authorized(event: Message | CallbackQuery, admin_service: AdminServic
         if isinstance(event, CallbackQuery):
             await event.answer("Недостатньо прав", show_alert=True)
         else:
-            await event.answer("Команда недоступна.")
+            await event.answer(
+                "Команда недоступна.\n"
+                f"Ваш Telegram ID: <code>{event.from_user.id}</code>\n"
+                "Попросіть головного адміністратора додати саме цей ID."
+            )
     return allowed
 
 
@@ -1216,7 +1224,12 @@ async def add_admin_start(
 
 
 @admin_router.message(AdminAddStates.telegram_id)
-async def add_admin_save(message: Message, admin_service: AdminService, state: FSMContext) -> None:
+async def add_admin_save(
+    message: Message,
+    bot: Bot,
+    admin_service: AdminService,
+    state: FSMContext,
+) -> None:
     if (
         not await _authorized(message, admin_service)
         or not message.text
@@ -1231,19 +1244,43 @@ async def add_admin_save(message: Message, admin_service: AdminService, state: F
         await message.answer("ID має бути додатним числом.")
         return
     await admin_service.add_admin(telegram_id, added_by=message.from_user.id)
+    commands_configured = True
+    try:
+        await configure_admin_commands(bot, telegram_id)
+    except TelegramAPIError:
+        commands_configured = False
+        logger.exception("failed_to_configure_admin_commands", extra={"telegram_id": telegram_id})
     await state.clear()
+    warning = ""
+    if not commands_configured:
+        warning = (
+            "\n\nПрава збережено, але Telegram ще не дозволив налаштувати меню. "
+            "Новий адміністратор має спочатку надіслати боту /start, а потім /admin."
+        )
     await message.answer(
-        f"✅ Адміністратора <code>{telegram_id}</code> додано.",
+        f"✅ Адміністратора <code>{telegram_id}</code> додано.{warning}",
         reply_markup=admins_keyboard(await admin_service.list_admins()),
     )
 
 
 @admin_router.callback_query(F.data.startswith("adm:admin_remove:"))
-async def remove_admin(callback: CallbackQuery, admin_service: AdminService) -> None:
+async def remove_admin(
+    callback: CallbackQuery,
+    bot: Bot,
+    admin_service: AdminService,
+) -> None:
     if not await _authorized(callback, admin_service) or callback.data is None:
         return
     telegram_id = int(callback.data.rsplit(":", 1)[1])
     removed = await admin_service.remove_admin(telegram_id)
+    if removed:
+        try:
+            await remove_admin_commands(bot, telegram_id)
+        except TelegramAPIError:
+            logger.exception(
+                "failed_to_remove_admin_commands",
+                extra={"telegram_id": telegram_id},
+            )
     if isinstance(callback.message, Message):
         await callback.message.edit_reply_markup(
             reply_markup=admins_keyboard(await admin_service.list_admins())
