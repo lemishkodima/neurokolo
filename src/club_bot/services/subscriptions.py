@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,6 +18,10 @@ from club_bot.domain.enums import (
     RecurringStatus,
     ReferralStatus,
     SubscriptionStatus,
+)
+from club_bot.domain.payments import (
+    WAYFORPAY_RECURRING_REFERENCE_MARKER,
+    canonical_wayforpay_order_reference,
 )
 from club_bot.domain.rules import as_utc, generate_public_token, utc_now
 from club_bot.integrations.wayforpay import WayForPayClient
@@ -68,6 +72,20 @@ class RecurringAuditResult:
             RecurringStatus.ACTIVE,
             RecurringStatus.NOT_APPLICABLE,
         }
+
+
+@dataclass(frozen=True)
+class RecurringReconciliationResult:
+    scanned: int
+    matched: int
+    approved: int
+    declined: int
+    amount_mismatches: int
+    missing_subscriptions: int
+    applied: bool
+
+
+UNMATCHED_APPROVED_PAYMENT_REASON = "Unmatched approved payment"
 
 
 class SubscriptionService:
@@ -254,15 +272,12 @@ class SubscriptionService:
                     SubscriptionStatus.ACTIVE,
                     SubscriptionStatus.PAST_DUE,
                 ):
-                    if subscription.status == SubscriptionStatus.ACTIVE:
-                        subscription.payment_failed_user_notified_at = None
-                        subscription.grace_reminder_notified_at = None
-                        subscription.access_revoked_at = None
-                        subscription.access_revoked_notified_at = None
-                    subscription.status = SubscriptionStatus.PAST_DUE
-                    subscription.payment_failed_at = utc_now()
-                    subscription.payment_failure_reason = payment.failure_reason
-                    self._update_repay_url(subscription, payload)
+                    self._apply_failed_payment(
+                        subscription,
+                        failure_reason=payment.failure_reason,
+                        failed_at=utc_now(),
+                        payload=payload,
+                    )
                     await self._restore_repay_url(session, subscription)
                 return True
 
@@ -306,25 +321,117 @@ class SubscriptionService:
             else:
                 # The callback is genuine, but it cannot be matched. Keeping the payment
                 # makes the issue visible to operators without granting access incorrectly.
-                payment.failure_reason = "Unmatched approved payment"
+                payment.failure_reason = UNMATCHED_APPROVED_PAYMENT_REASON
             return True
 
+    async def reconcile_unmatched_recurring_callbacks(
+        self,
+        *,
+        apply: bool = False,
+    ) -> RecurringReconciliationResult:
+        """Link and apply previously persisted WayForPay recurring callbacks.
+
+        Only unlinked callbacks containing WayForPay's recurring reference marker are
+        considered. Linking the payment makes the operation idempotent on repeated runs.
+        """
+        scanned = 0
+        matched = 0
+        approved = 0
+        declined = 0
+        amount_mismatches = 0
+        missing_subscriptions = 0
+        async with self.session_factory() as session, session.begin():
+            payments = list(
+                (
+                    await session.scalars(
+                        select(Payment)
+                        .where(
+                            Payment.subscription_id.is_(None),
+                            Payment.order_reference.contains(
+                                WAYFORPAY_RECURRING_REFERENCE_MARKER
+                            ),
+                        )
+                        .order_by(Payment.created_at, Payment.id)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            scanned = len(payments)
+            for payment in payments:
+                canonical_reference = canonical_wayforpay_order_reference(
+                    payment.order_reference
+                )
+                subscription = await session.scalar(
+                    select(Subscription)
+                    .where(
+                        Subscription.provider_subscription_id == canonical_reference
+                    )
+                    .with_for_update()
+                )
+                if subscription is None:
+                    missing_subscriptions += 1
+                    continue
+                if (
+                    Decimal(payment.amount).quantize(Decimal("0.01"))
+                    != Decimal(subscription.billing_amount).quantize(Decimal("0.01"))
+                    or payment.currency.upper() != subscription.billing_currency.upper()
+                ):
+                    amount_mismatches += 1
+                    continue
+
+                matched += 1
+                if payment.status == PaymentStatus.APPROVED:
+                    approved += 1
+                    if apply:
+                        payment.subscription_id = subscription.id
+                        payment.failure_reason = None
+                        self._extend_subscription(
+                            subscription,
+                            effective_at=as_utc(payment.created_at),
+                        )
+                elif payment.status == PaymentStatus.DECLINED:
+                    declined += 1
+                    if apply:
+                        payment.subscription_id = subscription.id
+                        if subscription.status in {
+                            SubscriptionStatus.ACTIVE,
+                            SubscriptionStatus.PAST_DUE,
+                        }:
+                            self._apply_failed_payment(
+                                subscription,
+                                failure_reason=payment.failure_reason,
+                                failed_at=as_utc(payment.created_at),
+                                payload=payment.provider_payload,
+                            )
+
+        return RecurringReconciliationResult(
+            scanned=scanned,
+            matched=matched,
+            approved=approved,
+            declined=declined,
+            amount_mismatches=amount_mismatches,
+            missing_subscriptions=missing_subscriptions,
+            applied=apply,
+        )
+
     async def is_initial_checkout_callback(self, order_reference: str) -> bool:
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
         async with self.session_factory() as session:
             status = await session.scalar(
                 select(CheckoutSession.status).where(
-                    CheckoutSession.order_reference == order_reference
+                    CheckoutSession.order_reference == canonical_reference
                 )
             )
             return status is not None and status != CheckoutStatus.CLAIMED
 
     async def checkout_owner_telegram_id(self, order_reference: str) -> int | None:
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
         async with self.session_factory() as session:
             telegram_id = await session.scalar(
                 select(User.telegram_id)
                 .join(CheckoutSession, CheckoutSession.user_id == User.id)
                 .where(
-                    CheckoutSession.order_reference == order_reference,
+                    CheckoutSession.order_reference == canonical_reference,
                     CheckoutSession.status == CheckoutStatus.CLAIMED,
                 )
             )
@@ -422,6 +529,7 @@ class SubscriptionService:
         self,
         order_reference: str,
     ) -> RecurringAuditResult | None:
+        order_reference = canonical_wayforpay_order_reference(order_reference)
         async with self.session_factory() as session:
             subscription = await session.scalar(
                 select(Subscription).where(
@@ -569,11 +677,16 @@ class SubscriptionService:
         *,
         rec_token: str | None = None,
         repay_url: str | None = None,
+        effective_at: datetime | None = None,
     ) -> None:
-        now = utc_now()
-        base = as_utc(subscription.current_period_end) if subscription.current_period_end else now
-        if base < now:
-            base = now
+        effective_time = as_utc(effective_at) if effective_at is not None else utc_now()
+        base = (
+            as_utc(subscription.current_period_end)
+            if subscription.current_period_end
+            else effective_time
+        )
+        if base < effective_time:
+            base = effective_time
         subscription.current_period_start = base
         subscription.current_period_end = add_billing_months(
             base,
@@ -591,6 +704,25 @@ class SubscriptionService:
             subscription.provider_rec_token = rec_token
         if repay_url:
             subscription.provider_repay_url = repay_url
+
+    @classmethod
+    def _apply_failed_payment(
+        cls,
+        subscription: Subscription,
+        *,
+        failure_reason: str | None,
+        failed_at: datetime,
+        payload: dict[str, Any],
+    ) -> None:
+        if subscription.status == SubscriptionStatus.ACTIVE:
+            subscription.payment_failed_user_notified_at = None
+            subscription.grace_reminder_notified_at = None
+            subscription.access_revoked_at = None
+            subscription.access_revoked_notified_at = None
+        subscription.status = SubscriptionStatus.PAST_DUE
+        subscription.payment_failed_at = as_utc(failed_at)
+        subscription.payment_failure_reason = failure_reason
+        cls._update_repay_url(subscription, payload)
 
     @classmethod
     def _update_repay_url(

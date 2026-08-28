@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from club_bot.domain.enums import SubscriptionStatus
+from club_bot.domain.payments import canonical_wayforpay_order_reference
 from club_bot.models import CheckoutSession, Plan, Subscription, User
 
 
@@ -91,7 +92,8 @@ class SubscriptionRepository:
     async def by_provider_identifiers(
         self, order_reference: str, rec_token: str | None
     ) -> Subscription | None:
-        conditions = [Subscription.provider_subscription_id == order_reference]
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
+        conditions = [Subscription.provider_subscription_id == canonical_reference]
         if rec_token:
             conditions.append(Subscription.provider_rec_token == rec_token)
         from sqlalchemy import or_

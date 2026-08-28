@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from club_bot.models import (
     plan_resources,
 )
 from club_bot.repositories import SubscriptionRepository, UserRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AccessDeniedError(PermissionError):
@@ -267,7 +270,7 @@ class AccessService:
         subscription_id: object,
         *,
         entitlement_cutoff: datetime | None = None,
-    ) -> None:
+    ) -> bool:
         cutoff = entitlement_cutoff if entitlement_cutoff is not None else utc_now()
         async with self.session_factory() as session, session.begin():
             subscription = await session.scalar(
@@ -280,14 +283,15 @@ class AccessService:
                 .with_for_update()
             )
             if subscription is None:
-                return
+                return False
             if (
                 subscription.status
                 not in (SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE)
                 or subscription.current_period_end is None
                 or as_utc(subscription.current_period_end) > cutoff
             ):
-                return
+                return False
+            fully_revoked = True
             for resource in subscription.plan.resources:
                 other_entitlement = await session.scalar(
                     select(Subscription.id)
@@ -308,7 +312,13 @@ class AccessService:
                 )
                 if other_entitlement is not None:
                     continue
-                await self._remove_member(resource, subscription.user.telegram_id)
+                removed = await self._remove_member(
+                    resource,
+                    subscription.user.telegram_id,
+                )
+                if not removed:
+                    fully_revoked = False
+                    continue
                 membership = await session.scalar(
                     select(ResourceMembership).where(
                         ResourceMembership.user_id == subscription.user_id,
@@ -327,21 +337,32 @@ class AccessService:
                     membership.revoked_at = utc_now()
                     membership.invite_link = None
             subscription.status = SubscriptionStatus.EXPIRED
-            subscription.access_revoked_at = utc_now()
+            subscription.access_revoked_at = utc_now() if fully_revoked else None
+            return fully_revoked
 
     async def expire_due(self, *, grace_period_hours: int, limit: int = 100) -> int:
         cutoff = utc_now() - timedelta(hours=grace_period_hours)
         async with self.session_factory() as session, session.begin():
             due = await SubscriptionRepository(session).expired(cutoff, limit=limit)
             ids = [item.id for item in due]
+        revoked = 0
         for subscription_id in ids:
-            await self.revoke_subscription_access(
-                subscription_id,
-                entitlement_cutoff=cutoff,
-            )
-        return len(ids)
+            try:
+                fully_revoked = await self.revoke_subscription_access(
+                    subscription_id,
+                    entitlement_cutoff=cutoff,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not revoke expired subscription %s; continuing with the batch",
+                    subscription_id,
+                )
+                continue
+            if fully_revoked:
+                revoked += 1
+        return revoked
 
-    async def _remove_member(self, resource: TelegramResource, telegram_id: int) -> None:
+    async def _remove_member(self, resource: TelegramResource, telegram_id: int) -> bool:
         try:
             await self.bot.ban_chat_member(chat_id=resource.chat_id, user_id=telegram_id)
             await self.bot.unban_chat_member(
@@ -349,8 +370,18 @@ class AccessService:
                 user_id=telegram_id,
                 only_if_banned=True,
             )
+            return True
         except TelegramBadRequest as error:
-            # "user not found" means there is no access left to revoke. Permission
-            # errors are re-raised because they require operator intervention.
-            if "user not found" not in str(error).casefold():
-                raise
+            message = str(error).casefold()
+            if "user not found" in message:
+                return True
+            if "can't remove chat owner" in message:
+                logger.error(
+                    "Cannot revoke Telegram owner %s from resource %s (%s)",
+                    telegram_id,
+                    resource.name,
+                    resource.chat_id,
+                )
+                return False
+            # Other permission errors require operator intervention and remain retryable.
+            raise

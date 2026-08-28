@@ -17,6 +17,7 @@ from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import (
     CheckoutStatus,
     MembershipStatus,
+    PaymentStatus,
     RecurringStatus,
     ReferralStatus,
     ResourceType,
@@ -716,6 +717,7 @@ async def test_failed_renewal_records_dunning_and_success_clears_it(
     declined = dict(callback)
     declined.update(
         {
+            "orderReference": f"{checkout.order_reference}_WFPREG-520778-1",
             "authCode": "",
             "transactionStatus": "Declined",
             "reasonCode": 1101,
@@ -723,6 +725,7 @@ async def test_failed_renewal_records_dunning_and_success_clears_it(
             "processingDate": 1_700_000_100,
         }
     )
+    declined.pop("recToken")
     sign(declined)
     assert await subscriptions.process_callback(declined) is True
 
@@ -741,11 +744,13 @@ async def test_failed_renewal_records_dunning_and_success_clears_it(
     recovered = dict(callback)
     recovered.update(
         {
+            "orderReference": f"{checkout.order_reference}_WFPREG-520778-1.1",
             "authCode": "recovered",
             "processingDate": 1_700_000_200,
             "repayUrl": "https://evil.example/steal",
         }
     )
+    recovered.pop("recToken")
     sign(recovered)
     assert await subscriptions.process_callback(recovered) is True
 
@@ -760,6 +765,133 @@ async def test_failed_renewal_records_dunning_and_success_clears_it(
         assert stored.payment_failed_at is None
         assert stored.payment_failure_reason is None
         assert stored.provider_repay_url == "https://secure.wayforpay.com/repay/safe-token"
+
+
+async def test_reconcile_unmatched_recurring_callbacks_is_idempotent(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    services: tuple[UserService, SubscriptionService, WayForPayClient],
+) -> None:
+    _, session_factory = database
+    _, subscriptions, _ = services
+    now = utc_now()
+    async with session_factory() as session, session.begin():
+        plan = Plan(code="reconcile", name="Reconcile", price=610, currency="UAH")
+        recovered_user = User(
+            telegram_id=901,
+            first_name="Recovered",
+            referral_code="RECOVERED901",
+        )
+        failed_user = User(
+            telegram_id=902,
+            first_name="Failed",
+            referral_code="FAILED902",
+        )
+        session.add_all([plan, recovered_user, failed_user])
+        await session.flush()
+        recovered_subscription = Subscription(
+            user_id=recovered_user.id,
+            plan_id=plan.id,
+            status=SubscriptionStatus.ACTIVE,
+            current_period_start=now - timedelta(days=30),
+            current_period_end=now + timedelta(hours=1),
+            billing_amount=610,
+            billing_currency="UAH",
+            billing_months=1,
+            provider="wayforpay",
+            provider_subscription_id="CLUB-RECOVERED",
+        )
+        failed_subscription = Subscription(
+            user_id=failed_user.id,
+            plan_id=plan.id,
+            status=SubscriptionStatus.ACTIVE,
+            current_period_start=now - timedelta(days=30),
+            current_period_end=now + timedelta(hours=2),
+            billing_amount=610,
+            billing_currency="UAH",
+            billing_months=1,
+            provider="wayforpay",
+            provider_subscription_id="CLUB-FAILED",
+        )
+        session.add_all([recovered_subscription, failed_subscription])
+        await session.flush()
+        recovered_end = recovered_subscription.current_period_end
+        payments = [
+            Payment(
+                subscription_id=None,
+                provider_event_id="declined-before-retry",
+                order_reference="CLUB-RECOVERED_WFPREG-1",
+                amount=610,
+                currency="UAH",
+                status=PaymentStatus.DECLINED,
+                failure_reason="Insufficient funds",
+                provider_payload={},
+                created_at=now - timedelta(minutes=3),
+            ),
+            Payment(
+                subscription_id=None,
+                provider_event_id="approved-retry",
+                order_reference="CLUB-RECOVERED_WFPREG-1.1",
+                amount=610,
+                currency="UAH",
+                status=PaymentStatus.APPROVED,
+                failure_reason="Unmatched approved payment",
+                provider_payload={},
+                created_at=now - timedelta(minutes=2),
+            ),
+            Payment(
+                subscription_id=None,
+                provider_event_id="declined-final",
+                order_reference="CLUB-FAILED_WFPREG-2",
+                amount=610,
+                currency="UAH",
+                status=PaymentStatus.DECLINED,
+                failure_reason="Insufficient funds",
+                provider_payload={},
+                created_at=now - timedelta(minutes=1),
+            ),
+        ]
+        session.add_all(payments)
+
+    dry_run = await subscriptions.reconcile_unmatched_recurring_callbacks()
+    assert dry_run.scanned == 3
+    assert dry_run.matched == 3
+    assert dry_run.approved == 1
+    assert dry_run.declined == 2
+    assert dry_run.applied is False
+
+    async with session_factory() as session:
+        still_unlinked = list(
+            (await session.scalars(select(Payment).where(Payment.subscription_id.is_(None)))).all()
+        )
+        assert len(still_unlinked) == 3
+
+    applied = await subscriptions.reconcile_unmatched_recurring_callbacks(apply=True)
+    assert applied.applied is True
+    assert applied.matched == 3
+
+    async with session_factory() as session:
+        recovered = await session.get(Subscription, recovered_subscription.id)
+        failed = await session.get(Subscription, failed_subscription.id)
+        linked = list((await session.scalars(select(Payment))).all())
+        assert recovered is not None
+        assert recovered.status == SubscriptionStatus.ACTIVE
+        assert recovered.current_period_end is not None
+        assert recovered_end is not None
+        assert as_utc(recovered.current_period_end) > as_utc(recovered_end)
+        assert recovered.payment_failure_reason is None
+        assert failed is not None
+        assert failed.status == SubscriptionStatus.PAST_DUE
+        assert failed.payment_failure_reason == "Insufficient funds"
+        assert all(payment.subscription_id is not None for payment in linked)
+        assert all(
+            payment.failure_reason is None
+            for payment in linked
+            if payment.status == PaymentStatus.APPROVED
+        )
+
+    repeated = await subscriptions.reconcile_unmatched_recurring_callbacks(apply=True)
+    assert repeated.scanned == 0
+    assert repeated.matched == 0
 
 
 async def test_complete_subscription_lifecycle(

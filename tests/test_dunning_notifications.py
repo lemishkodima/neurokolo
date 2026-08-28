@@ -75,7 +75,7 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         payment = Payment(
             subscription_id=subscription.id,
             provider_event_id="failed-event",
-            order_reference="CLUB-DUNNING",
+            order_reference="CLUB-DUNNING_WFPREG-123-1",
             amount=990,
             currency="UAH",
             status=PaymentStatus.DECLINED,
@@ -95,7 +95,12 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         AdminService(session_factory, [900]),
         failed_payment_admin_alerts_enabled=False,
     )
-    assert await disabled_service.send_failed_payment_admin_alert("CLUB-DUNNING") is False
+    assert (
+        await disabled_service.send_failed_payment_admin_alert(
+            "CLUB-DUNNING_WFPREG-123-1"
+        )
+        is False
+    )
     assert disabled_bot.messages == []
     async with session_factory() as session:
         stored_payment = await session.get(Payment, payment_id)
@@ -114,7 +119,7 @@ async def test_failed_payment_reminder_admin_alert_and_final_notice(
         failed_payment_admin_alerts_enabled=True,
     )
 
-    assert await service.send_payment_failed("CLUB-DUNNING") is True
+    assert await service.send_payment_failed("CLUB-DUNNING_WFPREG-123-1") is True
     assert [message[0] for message in bot.messages] == [123, 900]
     assert "Не вдалося продовжити підписку" in bot.messages[0][1]
     retry_markup = bot.messages[0][2]

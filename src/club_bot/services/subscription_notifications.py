@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from club_bot.domain.enums import PaymentStatus, SubscriptionStatus
+from club_bot.domain.payments import canonical_wayforpay_order_reference
 from club_bot.domain.rules import as_utc, utc_now
 from club_bot.models import CheckoutSession, Payment, Subscription
 from club_bot.services.access import AccessService
@@ -513,7 +514,8 @@ class SubscriptionNotificationService:
         rec_token: str | None,
     ) -> DunningNotice | None:
         assert self.session_factory is not None
-        conditions = [Subscription.provider_subscription_id == order_reference]
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
+        conditions = [Subscription.provider_subscription_id == canonical_reference]
         if rec_token:
             conditions.append(Subscription.provider_rec_token == rec_token)
         async with self.session_factory() as session:

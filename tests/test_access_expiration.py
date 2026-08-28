@@ -4,6 +4,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import BanChatMember
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.db import create_engine, create_session_factory
@@ -166,5 +169,180 @@ async def test_expiration_preserves_access_covered_by_another_subscription(
         assert stored_current.status == SubscriptionStatus.ACTIVE
         assert stored_membership is not None
         assert stored_membership.status == MembershipStatus.ACTIVE
+
+    await engine.dispose()
+
+
+async def test_chat_owner_does_not_block_other_expirations(tmp_path: Path) -> None:
+    class OwnerAwareBot(FakeBot):
+        async def ban_chat_member(self, *, chat_id: int, user_id: int) -> None:
+            if user_id == 123:
+                raise TelegramBadRequest(
+                    method=BanChatMember(chat_id=chat_id, user_id=user_id),
+                    message="Bad Request: can't remove chat owner",
+                )
+            await super().ban_chat_member(chat_id=chat_id, user_id=user_id)
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'owner.db'}")
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session, session.begin():
+        resource = TelegramResource(
+            code="community",
+            name="Community",
+            chat_id=-100123,
+            resource_type=ResourceType.SUPERGROUP,
+        )
+        plan = Plan(code="base", name="Base", price=990, resources=[resource])
+        owner = User(telegram_id=123, first_name="Owner", referral_code="OWNER123")
+        member = User(telegram_id=456, first_name="Member", referral_code="MEMBER456")
+        session.add_all([resource, plan, owner, member])
+        await session.flush()
+        subscriptions = [
+            Subscription(
+                user_id=owner.id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE,
+                current_period_start=utc_now() - timedelta(days=31),
+                current_period_end=utc_now() - timedelta(minutes=2),
+                billing_amount=990,
+                billing_currency="UAH",
+                provider_subscription_id="CLUB-OWNER",
+            ),
+            Subscription(
+                user_id=member.id,
+                plan_id=plan.id,
+                status=SubscriptionStatus.ACTIVE,
+                current_period_start=utc_now() - timedelta(days=31),
+                current_period_end=utc_now() - timedelta(minutes=1),
+                billing_amount=990,
+                billing_currency="UAH",
+                provider_subscription_id="CLUB-MEMBER",
+            ),
+        ]
+        memberships = [
+            ResourceMembership(
+                user_id=owner.id,
+                resource_id=resource.id,
+                status=MembershipStatus.ACTIVE,
+            ),
+            ResourceMembership(
+                user_id=member.id,
+                resource_id=resource.id,
+                status=MembershipStatus.ACTIVE,
+            ),
+        ]
+        session.add_all([*subscriptions, *memberships])
+
+    bot: Any = OwnerAwareBot()
+    access = AccessService(
+        session_factory,
+        bot,
+        invite_ttl_seconds=3600,
+        grace_period_hours=0,
+    )
+    assert await access.expire_due(grace_period_hours=0) == 1
+    assert ("ban", -100123, 456) in bot.calls
+
+    async with session_factory() as session:
+        stored_subscriptions = list(
+            (
+                await session.scalars(
+                    select(Subscription).order_by(Subscription.current_period_end)
+                )
+            ).all()
+        )
+        stored_memberships = list(
+            (
+                await session.scalars(
+                    select(ResourceMembership).order_by(ResourceMembership.user_id)
+                )
+            ).all()
+        )
+        assert stored_subscriptions[0].status == SubscriptionStatus.EXPIRED
+        assert stored_subscriptions[0].access_revoked_at is None
+        assert stored_subscriptions[1].status == SubscriptionStatus.EXPIRED
+        assert stored_subscriptions[1].access_revoked_at is not None
+        statuses = {item.user_id: item.status for item in stored_memberships}
+        assert statuses[owner.id] == MembershipStatus.ACTIVE
+        assert statuses[member.id] == MembershipStatus.REVOKED
+
+    await engine.dispose()
+
+
+async def test_one_permission_error_does_not_abort_expiration_batch(tmp_path: Path) -> None:
+    class PermissionFailingBot(FakeBot):
+        async def ban_chat_member(self, *, chat_id: int, user_id: int) -> None:
+            if user_id == 123:
+                raise TelegramBadRequest(
+                    method=BanChatMember(chat_id=chat_id, user_id=user_id),
+                    message="Bad Request: not enough rights",
+                )
+            await super().ban_chat_member(chat_id=chat_id, user_id=user_id)
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'permission.db'}")
+    session_factory: async_sessionmaker[AsyncSession] = create_session_factory(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session, session.begin():
+        resource = TelegramResource(
+            code="community",
+            name="Community",
+            chat_id=-100123,
+            resource_type=ResourceType.SUPERGROUP,
+        )
+        plan = Plan(code="base", name="Base", price=990, resources=[resource])
+        blocked = User(telegram_id=123, first_name="Blocked", referral_code="BLOCKED123")
+        member = User(telegram_id=456, first_name="Member", referral_code="MEMBER456")
+        session.add_all([resource, plan, blocked, member])
+        await session.flush()
+        session.add_all(
+            [
+                Subscription(
+                    user_id=blocked.id,
+                    plan_id=plan.id,
+                    status=SubscriptionStatus.ACTIVE,
+                    current_period_start=utc_now() - timedelta(days=31),
+                    current_period_end=utc_now() - timedelta(minutes=2),
+                    billing_amount=990,
+                    billing_currency="UAH",
+                    provider_subscription_id="CLUB-BLOCKED",
+                ),
+                Subscription(
+                    user_id=member.id,
+                    plan_id=plan.id,
+                    status=SubscriptionStatus.ACTIVE,
+                    current_period_start=utc_now() - timedelta(days=31),
+                    current_period_end=utc_now() - timedelta(minutes=1),
+                    billing_amount=990,
+                    billing_currency="UAH",
+                    provider_subscription_id="CLUB-MEMBER",
+                ),
+            ]
+        )
+
+    bot: Any = PermissionFailingBot()
+    access = AccessService(
+        session_factory,
+        bot,
+        invite_ttl_seconds=3600,
+        grace_period_hours=0,
+    )
+    assert await access.expire_due(grace_period_hours=0) == 1
+
+    async with session_factory() as session:
+        blocked_subscription = await session.scalar(
+            select(Subscription).where(Subscription.provider_subscription_id == "CLUB-BLOCKED")
+        )
+        member_subscription = await session.scalar(
+            select(Subscription).where(Subscription.provider_subscription_id == "CLUB-MEMBER")
+        )
+        assert blocked_subscription is not None
+        assert blocked_subscription.status == SubscriptionStatus.ACTIVE
+        assert member_subscription is not None
+        assert member_subscription.status == SubscriptionStatus.EXPIRED
 
     await engine.dispose()

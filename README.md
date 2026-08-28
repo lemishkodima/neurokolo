@@ -339,6 +339,22 @@ When WayForPay supplies the signed transaction's `repayUrl`, the member gets a
 before grace expires and a final message after Telegram access is revoked. Successful renewal
 clears all dunning state, so old reminders cannot be sent.
 
+WayForPay recurring callbacks use a derived reference such as
+`CLUB-…_WFPREG-123-1` (and `.1` for a retry) and may omit `recToken`. The application
+canonicalizes that value back to the original subscription reference before applying an approved
+or declined event. To audit or repair callbacks persisted by an older release, run:
+
+```bash
+club-admin reconcile-recurring-callbacks
+club-admin reconcile-recurring-callbacks --apply
+```
+
+The first command is read-only. The applying command links each payment before changing the
+subscription, so rerunning it cannot extend the same payment twice. Expiration also isolates each
+subscription: one Telegram permission failure cannot block the rest of the batch. Telegram does
+not permit a bot to remove a channel owner; that entitlement is expired without recording a false
+successful access revocation.
+
 ## Production notes
 
 - Use `compose.production.yml`; it runs Caddy, PostgreSQL, migrations, API, one worker, verified

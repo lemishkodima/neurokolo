@@ -7,6 +7,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from club_bot.config import get_settings
+from club_bot.container import build_container
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.billing import SUPPORTED_BILLING_MONTHS
 from club_bot.domain.enums import ResourceType
@@ -75,6 +76,23 @@ async def _attach_resource(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
+async def _reconcile_recurring_callbacks(args: argparse.Namespace) -> None:
+    container = build_container(get_settings())
+    try:
+        result = await container.subscription_service.reconcile_unmatched_recurring_callbacks(
+            apply=bool(args.apply)
+        )
+        mode = "APPLY" if result.applied else "DRY-RUN"
+        print(
+            f"{mode}: scanned={result.scanned} matched={result.matched} "
+            f"approved={result.approved} declined={result.declined} "
+            f"amount_mismatches={result.amount_mismatches} "
+            f"missing_subscriptions={result.missing_subscriptions}"
+        )
+    finally:
+        await container.close()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Club administration utility")
     commands = parser.add_subparsers(required=True)
@@ -99,6 +117,17 @@ def _parser() -> argparse.ArgumentParser:
     attach.add_argument("--plan", required=True)
     attach.add_argument("--resource", required=True)
     attach.set_defaults(handler=_attach_resource)
+
+    reconcile = commands.add_parser(
+        "reconcile-recurring-callbacks",
+        help="Link and apply persisted WayForPay _WFPREG callbacks",
+    )
+    reconcile.add_argument(
+        "--apply",
+        action="store_true",
+        help="Commit the reconciliation; without this flag only report counts",
+    )
+    reconcile.set_defaults(handler=_reconcile_recurring_callbacks)
     return parser
 
 
