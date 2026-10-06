@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -85,7 +86,33 @@ class RecurringReconciliationResult:
     applied: bool
 
 
+@dataclass(frozen=True)
+class ExpirationPreparationResult:
+    subscription_id: uuid.UUID
+    ready: bool
+    failure_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovedCallbackContext:
+    telegram_id: int
+    restore_access: bool
+    resume_after_expiration: bool
+    preserve_cancellation: bool
+
+
+@dataclass(frozen=True)
+class ExpiredRecurringReconciliationResult:
+    scanned: int
+    active: int
+    suspended: int
+    terminal: int
+    failed: int
+    applied: bool
+
+
 UNMATCHED_APPROVED_PAYMENT_REASON = "Unmatched approved payment"
+EXPIRATION_SUSPEND_REASON = "Auto-suspended before Telegram access revocation"
 
 
 class SubscriptionService:
@@ -414,6 +441,303 @@ class SubscriptionService:
             applied=apply,
         )
 
+    async def prepare_subscription_for_expiration(
+        self,
+        subscription_id: object,
+        cutoff: datetime,
+    ) -> ExpirationPreparationResult:
+        """Stop a production recurring rule before Telegram access is revoked."""
+        cutoff = as_utc(cutoff)
+        async with self.session_factory() as session:
+            subscription = await session.get(Subscription, subscription_id)
+            if subscription is None:
+                raise SubscriptionNotFoundError
+            if not self._is_due_for_expiration(subscription, cutoff):
+                return ExpirationPreparationResult(subscription.id, ready=False)
+            if subscription.provider != "wayforpay":
+                return ExpirationPreparationResult(subscription.id, ready=True)
+            order_reference = subscription.provider_subscription_id
+            if not order_reference:
+                reason = "Production subscription has no provider subscription reference"
+                await self._record_expiration_shutdown_failure(subscription.id, reason)
+                return ExpirationPreparationResult(
+                    subscription.id,
+                    ready=False,
+                    failure_reason=reason,
+                )
+
+        try:
+            data = await self.wayforpay.recurring_status(order_reference)
+        except Exception as error:
+            reason = f"{type(error).__name__}: recurring STATUS failed before expiration"
+            await self._record_expiration_shutdown_failure(subscription_id, reason)
+            return ExpirationPreparationResult(
+                subscription.id,
+                ready=False,
+                failure_reason=reason,
+            )
+
+        result, provider_reason = self._recurring_result(order_reference, data)
+        terminal_statuses = {
+            RecurringStatus.SUSPENDED,
+            RecurringStatus.REMOVED,
+            RecurringStatus.COMPLETED,
+            RecurringStatus.MISSING,
+        }
+        issued_suspend = False
+        final_status = result.status
+        final_reason = provider_reason
+        if result.status in {
+            RecurringStatus.ACTIVE,
+            RecurringStatus.CREATED,
+            RecurringStatus.CONFIRMED,
+        }:
+            try:
+                await self.wayforpay.suspend_recurring(order_reference)
+            except Exception as error:
+                reason = f"{type(error).__name__}: recurring SUSPEND failed before expiration"
+                await self._record_expiration_shutdown_failure(
+                    subscription_id,
+                    reason,
+                    recurring_status=result.status,
+                )
+                return ExpirationPreparationResult(
+                    subscription.id,
+                    ready=False,
+                    failure_reason=reason,
+                )
+            issued_suspend = True
+            final_status = RecurringStatus.SUSPENDED
+            final_reason = EXPIRATION_SUSPEND_REASON
+        elif result.status not in terminal_statuses:
+            reason = f"WayForPay STATUS could not prove shutdown: {provider_reason}"
+            await self._record_expiration_shutdown_failure(
+                subscription_id,
+                reason,
+                recurring_status=result.status,
+            )
+            return ExpirationPreparationResult(
+                subscription.id,
+                ready=False,
+                failure_reason=reason,
+            )
+
+        stale_after_provider_call = False
+        preserve_cancellation = False
+        async with self.session_factory() as session, session.begin():
+            stored = await session.get(Subscription, subscription_id, with_for_update=True)
+            if stored is None:
+                raise SubscriptionNotFoundError
+            if not self._is_due_for_expiration(stored, cutoff):
+                stale_after_provider_call = True
+                preserve_cancellation = stored.cancel_at_period_end
+            else:
+                now = utc_now()
+                stored.provider_recurring_status = final_status.value
+                stored.provider_recurring_checked_at = now
+                stored.provider_recurring_reason = final_reason[:1000]
+                stored.provider_expiration_shutdown_at = now
+                stored.provider_expiration_shutdown_error = None
+                stored.provider_expiration_shutdown_alerted_at = None
+
+        if stale_after_provider_call:
+            if issued_suspend and not preserve_cancellation:
+                await self._resume_after_expiration_race(subscription_id, order_reference)
+            return ExpirationPreparationResult(subscription.id, ready=False)
+        return ExpirationPreparationResult(subscription.id, ready=True)
+
+    async def approved_callback_context(
+        self,
+        order_reference: str,
+    ) -> ApprovedCallbackContext | None:
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    select(Subscription, User.telegram_id)
+                    .join(User, User.id == Subscription.user_id)
+                    .where(Subscription.provider_subscription_id == canonical_reference)
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            subscription, telegram_id = row
+            return ApprovedCallbackContext(
+                telegram_id=int(telegram_id),
+                restore_access=(
+                    subscription.status == SubscriptionStatus.EXPIRED
+                    or subscription.access_revoked_at is not None
+                ),
+                resume_after_expiration=(
+                    subscription.provider_expiration_shutdown_at is not None
+                    and not subscription.cancel_at_period_end
+                ),
+                preserve_cancellation=subscription.cancel_at_period_end,
+            )
+
+    async def recover_recurring_after_approved(
+        self,
+        order_reference: str,
+        context: ApprovedCallbackContext,
+    ) -> None:
+        canonical_reference = canonical_wayforpay_order_reference(order_reference)
+        if not context.resume_after_expiration and not context.preserve_cancellation:
+            return
+        try:
+            if context.preserve_cancellation:
+                await self.wayforpay.suspend_recurring(canonical_reference)
+                status = RecurringStatus.SUSPENDED
+                reason = "Renewal raced with user cancellation; rule suspended again"
+            else:
+                await self.wayforpay.resume_recurring(canonical_reference)
+                status = RecurringStatus.ACTIVE
+                reason = "Recurring rule resumed after late approved renewal"
+        except Exception as error:
+            async with self.session_factory() as session, session.begin():
+                subscription = await session.scalar(
+                    select(Subscription)
+                    .where(Subscription.provider_subscription_id == canonical_reference)
+                    .with_for_update()
+                )
+                if subscription is not None:
+                    subscription.provider_recurring_status = RecurringStatus.CHECK_FAILED.value
+                    subscription.provider_recurring_checked_at = utc_now()
+                    subscription.provider_recurring_reason = (
+                        f"{type(error).__name__}: recurring recovery after Approved failed"
+                    )
+            return
+
+        async with self.session_factory() as session, session.begin():
+            subscription = await session.scalar(
+                select(Subscription)
+                .where(Subscription.provider_subscription_id == canonical_reference)
+                .with_for_update()
+            )
+            if subscription is None:
+                return
+            now = utc_now()
+            subscription.provider_recurring_status = status.value
+            subscription.provider_recurring_checked_at = now
+            subscription.provider_recurring_reason = reason
+            subscription.provider_expiration_shutdown_at = (
+                now if context.preserve_cancellation else None
+            )
+            subscription.provider_expiration_shutdown_error = None
+            subscription.provider_expiration_shutdown_alerted_at = None
+            if context.preserve_cancellation:
+                subscription.cancel_at_period_end = True
+                subscription.canceled_at = subscription.canceled_at or now
+
+    async def reconcile_expired_recurring_rules(
+        self,
+        *,
+        apply: bool = False,
+    ) -> ExpiredRecurringReconciliationResult:
+        """Audit legacy expired subscriptions and optionally stop chargeable rules."""
+        async with self.session_factory() as session:
+            subscription_ids = list(
+                (
+                    await session.scalars(
+                        select(Subscription.id)
+                        .where(
+                            Subscription.provider == "wayforpay",
+                            Subscription.status == SubscriptionStatus.EXPIRED,
+                            Subscription.provider_subscription_id.is_not(None),
+                        )
+                        .order_by(Subscription.current_period_end, Subscription.id)
+                    )
+                ).all()
+            )
+
+        active = 0
+        suspended = 0
+        terminal = 0
+        failed = 0
+        terminal_statuses = {
+            RecurringStatus.REMOVED,
+            RecurringStatus.COMPLETED,
+            RecurringStatus.MISSING,
+        }
+        for subscription_id in subscription_ids:
+            issued_suspend = False
+            async with self.session_factory() as session:
+                subscription = await session.get(Subscription, subscription_id)
+                if (
+                    subscription is None
+                    or subscription.status != SubscriptionStatus.EXPIRED
+                    or not subscription.provider_subscription_id
+                ):
+                    continue
+                order_reference = subscription.provider_subscription_id
+            try:
+                data = await self.wayforpay.recurring_status(order_reference)
+                result, provider_reason = self._recurring_result(order_reference, data)
+            except Exception:
+                failed += 1
+                continue
+            if result.status == RecurringStatus.ACTIVE:
+                active += 1
+                if not apply:
+                    continue
+                async with self.session_factory() as session:
+                    still_expired = await session.scalar(
+                        select(Subscription.id).where(
+                            Subscription.id == subscription_id,
+                            Subscription.status == SubscriptionStatus.EXPIRED,
+                        )
+                    )
+                if still_expired is None:
+                    continue
+                try:
+                    await self.wayforpay.suspend_recurring(order_reference)
+                except Exception:
+                    failed += 1
+                    continue
+                result = RecurringAuditResult(
+                    order_reference=order_reference,
+                    status=RecurringStatus.SUSPENDED,
+                )
+                issued_suspend = True
+                provider_reason = EXPIRATION_SUSPEND_REASON
+                suspended += 1
+            elif result.status == RecurringStatus.SUSPENDED:
+                suspended += 1
+            elif result.status in terminal_statuses:
+                terminal += 1
+            else:
+                failed += 1
+                continue
+
+            if apply:
+                resume_after_race = False
+                async with self.session_factory() as session, session.begin():
+                    stored = await session.get(
+                        Subscription,
+                        subscription_id,
+                        with_for_update=True,
+                    )
+                    if stored is None or stored.status != SubscriptionStatus.EXPIRED:
+                        resume_after_race = issued_suspend
+                    else:
+                        now = utc_now()
+                        stored.provider_recurring_status = result.status.value
+                        stored.provider_recurring_checked_at = now
+                        stored.provider_recurring_reason = provider_reason[:1000]
+                        stored.provider_expiration_shutdown_at = now
+                        stored.provider_expiration_shutdown_error = None
+                        stored.provider_expiration_shutdown_alerted_at = None
+                if resume_after_race:
+                    await self.wayforpay.resume_recurring(order_reference)
+
+        return ExpiredRecurringReconciliationResult(
+            scanned=len(subscription_ids),
+            active=active,
+            suspended=suspended,
+            terminal=terminal,
+            failed=failed,
+            applied=apply,
+        )
+
     async def is_initial_checkout_callback(self, order_reference: str) -> bool:
         canonical_reference = canonical_wayforpay_order_reference(order_reference)
         async with self.session_factory() as session:
@@ -495,6 +819,9 @@ class SubscriptionService:
                 else RecurringStatus.SUSPENDED.value
             )
             subscription.provider_recurring_checked_at = utc_now()
+            subscription.provider_expiration_shutdown_at = utc_now()
+            subscription.provider_expiration_shutdown_error = None
+            subscription.provider_expiration_shutdown_alerted_at = None
             return SubscriptionView(
                 plan_name=subscription.plan.name,
                 billing_amount=subscription.billing_amount,
@@ -700,6 +1027,9 @@ class SubscriptionService:
         subscription.grace_reminder_notified_at = None
         subscription.access_revoked_at = None
         subscription.access_revoked_notified_at = None
+        subscription.provider_expiration_shutdown_at = None
+        subscription.provider_expiration_shutdown_error = None
+        subscription.provider_expiration_shutdown_alerted_at = None
         if rec_token:
             subscription.provider_rec_token = rec_token
         if repay_url:
@@ -723,6 +1053,59 @@ class SubscriptionService:
         subscription.payment_failed_at = as_utc(failed_at)
         subscription.payment_failure_reason = failure_reason
         cls._update_repay_url(subscription, payload)
+
+    @staticmethod
+    def _is_due_for_expiration(subscription: Subscription, cutoff: datetime) -> bool:
+        return (
+            subscription.status
+            in {SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE}
+            and subscription.current_period_end is not None
+            and as_utc(subscription.current_period_end) <= cutoff
+        )
+
+    async def _record_expiration_shutdown_failure(
+        self,
+        subscription_id: object,
+        reason: str,
+        *,
+        recurring_status: RecurringStatus = RecurringStatus.CHECK_FAILED,
+    ) -> None:
+        async with self.session_factory() as session, session.begin():
+            subscription = await session.get(Subscription, subscription_id, with_for_update=True)
+            if subscription is None:
+                return
+            subscription.provider_recurring_status = recurring_status.value
+            subscription.provider_recurring_checked_at = utc_now()
+            subscription.provider_recurring_reason = reason[:1000]
+            subscription.provider_expiration_shutdown_at = None
+            subscription.provider_expiration_shutdown_error = reason[:1000]
+
+    async def _resume_after_expiration_race(
+        self,
+        subscription_id: object,
+        order_reference: str,
+    ) -> None:
+        try:
+            await self.wayforpay.resume_recurring(order_reference)
+        except Exception as error:
+            await self._record_expiration_shutdown_failure(
+                subscription_id,
+                f"{type(error).__name__}: recurring RESUME failed after renewal race",
+                recurring_status=RecurringStatus.SUSPENDED,
+            )
+            return
+        async with self.session_factory() as session, session.begin():
+            subscription = await session.get(Subscription, subscription_id, with_for_update=True)
+            if subscription is None:
+                return
+            subscription.provider_recurring_status = RecurringStatus.ACTIVE.value
+            subscription.provider_recurring_checked_at = utc_now()
+            subscription.provider_recurring_reason = (
+                "Recurring rule resumed because the entitlement renewed during expiration"
+            )
+            subscription.provider_expiration_shutdown_at = None
+            subscription.provider_expiration_shutdown_error = None
+            subscription.provider_expiration_shutdown_alerted_at = None
 
     @classmethod
     def _update_repay_url(

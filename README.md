@@ -311,7 +311,8 @@ Configure WayForPay to call `/webhooks/wayforpay`; the checkout payload already 
 
 ```text
 checkout created → paid → claimed in bot → active
-                                     ↘ failed renewal → past_due → 24h grace → revoked
+                                     ↘ failed renewal → past_due → 24h grace
+                                       → STATUS → SUSPEND → revoked
 cancel button → WayForPay suspended → active until period end
 period end + grace period → expired → removed from all plan resources
 ```
@@ -339,6 +340,14 @@ When WayForPay supplies the signed transaction's `repayUrl`, the member gets a
 before grace expires and a final message after Telegram access is revoked. Successful renewal
 clears all dunning state, so old reminders cannot be sent.
 
+Before an overdue production subscription is revoked from Telegram, the worker checks the
+WayForPay rule and suspends any still-chargeable recurrence. A provider timeout or rejected
+`SUSPEND` keeps Telegram access in place, is retried by the worker, and sends a deduplicated
+administrator alert. This prevents an expired member from being charged by an orphaned recurring
+rule. A late `Approved` event reactivates the entitlement, resumes a rule auto-suspended by the
+expiration race, and sends fresh personal join-request links; an explicit user cancellation is
+preserved.
+
 WayForPay recurring callbacks use a derived reference such as
 `CLUB-…_WFPREG-123-1` (and `.1` for a retry) and may omit `recToken`. The application
 canonicalizes that value back to the original subscription reference before applying an approved
@@ -347,6 +356,8 @@ or declined event. To audit or repair callbacks persisted by an older release, r
 ```bash
 club-admin reconcile-recurring-callbacks
 club-admin reconcile-recurring-callbacks --apply
+club-admin reconcile-expired-recurring-rules
+club-admin reconcile-expired-recurring-rules --apply
 ```
 
 The first command is read-only. The applying command links each payment before changing the
@@ -354,6 +365,10 @@ subscription, so rerunning it cannot extend the same payment twice. Expiration a
 subscription: one Telegram permission failure cannot block the rest of the batch. Telegram does
 not permit a bot to remove a channel owner; that entitlement is expired without recording a false
 successful access revocation.
+
+`reconcile-expired-recurring-rules` is also dry-run by default. With `--apply` it rechecks every
+legacy expired production subscription and suspends only rules that WayForPay still reports as
+`Active`; concurrent renewals are detected before the local state is committed.
 
 ## Production notes
 

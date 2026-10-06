@@ -5,6 +5,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
@@ -43,6 +44,19 @@ class JoinRequestReview:
     allowed: bool
 
 
+class ExpirationPreparation(Protocol):
+    @property
+    def ready(self) -> bool: ...
+
+
+class ExpirationGuard(Protocol):
+    async def prepare_subscription_for_expiration(
+        self,
+        subscription_id: object,
+        cutoff: datetime,
+    ) -> ExpirationPreparation: ...
+
+
 class AccessService:
     def __init__(
         self,
@@ -51,11 +65,13 @@ class AccessService:
         *,
         invite_ttl_seconds: int,
         grace_period_hours: int,
+        expiration_guard: ExpirationGuard | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.bot = bot
         self.invite_ttl_seconds = invite_ttl_seconds
         self.grace_period_hours = grace_period_hours
+        self.expiration_guard = expiration_guard
 
     async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
         async with self.session_factory() as session, session.begin():
@@ -348,6 +364,15 @@ class AccessService:
         revoked = 0
         for subscription_id in ids:
             try:
+                if self.expiration_guard is not None:
+                    preparation = (
+                        await self.expiration_guard.prepare_subscription_for_expiration(
+                            subscription_id,
+                            cutoff,
+                        )
+                    )
+                    if not preparation.ready:
+                        continue
                 fully_revoked = await self.revoke_subscription_access(
                     subscription_id,
                     entitlement_cutoff=cutoff,

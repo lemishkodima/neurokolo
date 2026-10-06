@@ -93,6 +93,22 @@ async def _reconcile_recurring_callbacks(args: argparse.Namespace) -> None:
         await container.close()
 
 
+async def _reconcile_expired_recurring_rules(args: argparse.Namespace) -> None:
+    container = build_container(get_settings())
+    try:
+        result = await container.subscription_service.reconcile_expired_recurring_rules(
+            apply=bool(args.apply)
+        )
+        mode = "APPLY" if result.applied else "DRY-RUN"
+        print(
+            f"{mode}: scanned={result.scanned} active={result.active} "
+            f"suspended={result.suspended} terminal={result.terminal} "
+            f"failed={result.failed}"
+        )
+    finally:
+        await container.close()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Club administration utility")
     commands = parser.add_subparsers(required=True)
@@ -128,6 +144,17 @@ def _parser() -> argparse.ArgumentParser:
         help="Commit the reconciliation; without this flag only report counts",
     )
     reconcile.set_defaults(handler=_reconcile_recurring_callbacks)
+
+    reconcile_expired = commands.add_parser(
+        "reconcile-expired-recurring-rules",
+        help="Audit expired subscriptions and stop any chargeable WayForPay rules",
+    )
+    reconcile_expired.add_argument(
+        "--apply",
+        action="store_true",
+        help="Suspend active expired rules; without this flag only report counts",
+    )
+    reconcile_expired.set_defaults(handler=_reconcile_expired_recurring_rules)
     return parser
 
 

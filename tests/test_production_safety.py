@@ -14,6 +14,7 @@ from club_bot.domain.enums import PaymentStatus, RecurringStatus
 from club_bot.models import Base, LandingTemplate, Payment
 from club_bot.schemas import CheckoutResponse
 from club_bot.services.checkout_links import create_personal_checkout_token
+from club_bot.services.subscriptions import ApprovedCallbackContext
 
 
 def settings_values() -> dict[str, object]:
@@ -276,6 +277,7 @@ async def test_approved_personal_checkout_callback_sends_activation_once() -> No
     )
     subscription_service = SimpleNamespace(
         verify_callback=Mock(),
+        approved_callback_context=AsyncMock(return_value=None),
         is_initial_checkout_callback=AsyncMock(return_value=True),
         process_callback=AsyncMock(side_effect=[True, False]),
         checkout_owner_telegram_id=AsyncMock(return_value=501),
@@ -311,6 +313,54 @@ async def test_approved_personal_checkout_callback_sends_activation_once() -> No
         "CLUB-personal"
     )
     send_recurring_rule_alert.assert_not_awaited()
+
+
+async def test_late_approved_renewal_sends_fresh_access_links() -> None:
+    settings = Settings(**settings_values())
+    callback_context = ApprovedCallbackContext(
+        telegram_id=777,
+        restore_access=True,
+        resume_after_expiration=True,
+        preserve_cancellation=False,
+    )
+    recurring_result = SimpleNamespace(
+        status=RecurringStatus.ACTIVE,
+        requires_alert=False,
+    )
+    recover = AsyncMock(return_value=None)
+    subscription_service = SimpleNamespace(
+        verify_callback=Mock(),
+        approved_callback_context=AsyncMock(return_value=callback_context),
+        is_initial_checkout_callback=AsyncMock(return_value=False),
+        process_callback=AsyncMock(return_value=True),
+        recover_recurring_after_approved=recover,
+        verify_recurring_for_order=AsyncMock(return_value=recurring_result),
+        callback_response=Mock(
+            return_value={"orderReference": "CLUB-late_WFPREG-1", "status": "accept"}
+        ),
+    )
+    send_activated = AsyncMock(return_value=True)
+    send_recurring_rule_alert = AsyncMock(return_value=False)
+    app = create_app(settings)
+    app.state.container = SimpleNamespace(
+        subscription_service=subscription_service,
+        subscription_notification_service=SimpleNamespace(
+            send_activated=send_activated,
+            send_recurring_rule_alert=send_recurring_rule_alert,
+        ),
+    )
+    transport = httpx.ASGITransport(app=app)
+    callback = {
+        "orderReference": "CLUB-late_WFPREG-1",
+        "transactionStatus": "Approved",
+    }
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/webhooks/wayforpay", json=callback)
+
+    assert response.status_code == 200
+    send_activated.assert_awaited_once_with(777)
+    recover.assert_awaited_once_with("CLUB-late_WFPREG-1", callback_context)
 
 
 async def test_public_landing_renders_safe_values_and_proxies_bot_avatar() -> None:

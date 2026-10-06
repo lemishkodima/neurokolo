@@ -266,6 +266,89 @@ class SubscriptionNotificationService:
                     subscription.provider_recurring_alerted_at = None
         return delivered
 
+    async def process_pending_expiration_shutdown_alerts(
+        self,
+        *,
+        limit: int = 100,
+    ) -> int:
+        if self.session_factory is None or self.admin_service is None:
+            return 0
+        async with self.session_factory() as session:
+            subscription_ids = list(
+                (
+                    await session.scalars(
+                        select(Subscription.id)
+                        .where(
+                            Subscription.provider_expiration_shutdown_error.is_not(None),
+                            Subscription.provider_expiration_shutdown_alerted_at.is_(None),
+                            Subscription.status.in_(
+                                [SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]
+                            ),
+                        )
+                        .order_by(Subscription.current_period_end)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        delivered = 0
+        for subscription_id in subscription_ids:
+            async with self.session_factory() as session, session.begin():
+                subscription = await session.scalar(
+                    select(Subscription)
+                    .options(
+                        selectinload(Subscription.user),
+                        selectinload(Subscription.plan),
+                    )
+                    .where(Subscription.id == subscription_id)
+                    .with_for_update()
+                )
+                if (
+                    subscription is None
+                    or subscription.provider_expiration_shutdown_error is None
+                    or subscription.provider_expiration_shutdown_alerted_at is not None
+                ):
+                    continue
+                subscription.provider_expiration_shutdown_alerted_at = utc_now()
+                telegram_id = int(subscription.user.telegram_id)
+                username = subscription.user.username
+                plan_name = subscription.plan.name
+                order_reference = subscription.provider_subscription_id or "невідомий"
+                reason = subscription.provider_expiration_shutdown_error
+
+            username_text = f"@{escape(username)}" if username else "немає"
+            text = (
+                "🚨 <b>Не вдалося зупинити регулярний платіж перед revoke</b>\n\n"
+                f"Користувач: <code>{telegram_id}</code> ({username_text})\n"
+                f"Тариф: {escape(plan_name)}\n"
+                f"Order reference: <code>{escape(order_reference)}</code>\n"
+                f"Причина: {escape(reason)}\n\n"
+                "Telegram-доступ поки не відкликано. Worker повторить спробу, "
+                "щоб не залишити активне списання після видалення користувача."
+            )
+            sent = False
+            for admin_id, _ in await self.admin_service.list_admins():
+                try:
+                    await self.bot.send_message(admin_id, text, reply_markup=None)
+                    sent = True
+                except TelegramAPIError:
+                    logger.exception(
+                        "Could not notify admin %s about expiration shutdown %s",
+                        admin_id,
+                        order_reference,
+                    )
+            if sent:
+                delivered += 1
+            else:
+                async with self.session_factory() as session, session.begin():
+                    subscription = await session.get(
+                        Subscription,
+                        subscription_id,
+                        with_for_update=True,
+                    )
+                    if subscription is not None:
+                        subscription.provider_expiration_shutdown_alerted_at = None
+        return delivered
+
     async def send_due_grace_reminders(self, *, limit: int = 100) -> int:
         if self.session_factory is None or self.grace_period_hours <= 0:
             return 0

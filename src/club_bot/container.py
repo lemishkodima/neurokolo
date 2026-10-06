@@ -118,6 +118,7 @@ def build_container(settings: Settings) -> Container:
         bot,
         invite_ttl_seconds=settings.invite_ttl_seconds,
         grace_period_hours=settings.payment_grace_period_hours,
+        expiration_guard=subscription_service,
     )
     admin_service = AdminService(session_factory, settings.admin_telegram_ids)
     catalog_service = CatalogService(session_factory, default_plan_code=settings.default_plan_code)

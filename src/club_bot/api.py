@@ -41,7 +41,11 @@ from club_bot.services.checkout_links import (
     verify_personal_checkout_token,
 )
 from club_bot.services.landing_templates import LandingTemplateService
-from club_bot.services.subscriptions import CheckoutOwnerNotFoundError, PlanNotFoundError
+from club_bot.services.subscriptions import (
+    ApprovedCallbackContext,
+    CheckoutOwnerNotFoundError,
+    PlanNotFoundError,
+)
 
 FALLBACK_BOT_AVATAR = (
     Path(__file__).parent / "assets" / "prelanding-logo.svg"
@@ -185,11 +189,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def verify_recurring_after_approved(
         container: Container,
         order_reference: str,
+        callback_context: ApprovedCallbackContext | None,
     ) -> None:
+        if callback_context is not None:
+            await container.subscription_service.recover_recurring_after_approved(
+                order_reference,
+                callback_context,
+            )
         result = await container.subscription_service.verify_recurring_for_order(
             order_reference
         )
-        if result is not None and result.requires_alert:
+        if (
+            result is not None
+            and result.requires_alert
+            and not (
+                callback_context is not None
+                and callback_context.preserve_cancellation
+                and result.status == RecurringStatus.SUSPENDED
+            )
+        ):
             await container.subscription_notification_service.send_recurring_rule_alert(
                 order_reference,
                 result.status.value,
@@ -338,8 +356,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         payload = await request.json()
         order_reference = str(payload.get("orderReference", ""))
+        approved = str(payload.get("transactionStatus", "")).casefold() == "approved"
+        callback_context: ApprovedCallbackContext | None = None
         try:
             container.subscription_service.verify_callback(payload)
+            if approved:
+                callback_context = (
+                    await container.subscription_service.approved_callback_context(
+                        order_reference
+                    )
+                )
             initial_checkout = await container.subscription_service.is_initial_checkout_callback(
                 order_reference
             )
@@ -348,13 +374,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail=str(error)
             ) from error
-        approved = str(payload.get("transactionStatus", "")).casefold() == "approved"
         if processed and approved and initial_checkout:
             telegram_id = await container.subscription_service.checkout_owner_telegram_id(
                 order_reference
             )
             if telegram_id is not None:
                 await container.subscription_notification_service.send_activated(telegram_id)
+        elif (
+            processed
+            and approved
+            and callback_context is not None
+            and callback_context.restore_access
+        ):
+            await container.subscription_notification_service.send_activated(
+                callback_context.telegram_id
+            )
         elif processed and not approved:
             rec_token = str(payload.get("recToken") or "") or None
             await container.subscription_notification_service.send_payment_failed(
@@ -366,6 +400,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 verify_recurring_after_approved,
                 container,
                 order_reference,
+                callback_context,
             )
         return container.subscription_service.callback_response(order_reference)
 

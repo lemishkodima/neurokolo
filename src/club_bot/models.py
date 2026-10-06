@@ -148,6 +148,13 @@ class Subscription(TimestampMixin, Base):
     provider_recurring_alerted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    provider_expiration_shutdown_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    provider_expiration_shutdown_error: Mapped[str | None] = mapped_column(Text)
+    provider_expiration_shutdown_alerted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     payment_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payment_failure_reason: Mapped[str | None] = mapped_column(Text)
     payment_failed_user_notified_at: Mapped[datetime | None] = mapped_column(

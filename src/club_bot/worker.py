@@ -53,6 +53,12 @@ async def _worker() -> None:
                 )
                 if count:
                     logger.info("Revoked %s expired subscriptions", count)
+                count = (
+                    await container.subscription_notification_service
+                    .process_pending_expiration_shutdown_alerts()
+                )
+                if count:
+                    logger.info("Delivered %s expiration-shutdown alerts", count)
             except Exception:
                 logger.exception("Subscription expiration cycle failed")
             try:
