@@ -1178,6 +1178,10 @@ class SubscriptionService:
         }
         if reason_code == 4100 and provider_status in known_statuses:
             status = known_statuses[provider_status]
+        elif reason_code == 4107 and provider_status == RecurringStatus.REMOVED.value:
+            # WayForPay reports a closed regular-payment rule as Removed with
+            # reasonCode 4107 instead of the generic successful code 4100.
+            status = RecurringStatus.REMOVED
         elif reason_code == 4102:
             status = RecurringStatus.MISSING
         else:

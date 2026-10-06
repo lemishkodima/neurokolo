@@ -77,6 +77,20 @@ def subscription_service(
     )
 
 
+def test_wayforpay_closed_rule_is_a_terminal_removed_status() -> None:
+    result, reason = SubscriptionService._recurring_result(
+        "CLUB-CLOSED",
+        {
+            "reasonCode": 4107,
+            "reason": "Regular payment is closed",
+            "status": "Removed",
+        },
+    )
+
+    assert result.status == RecurringStatus.REMOVED
+    assert reason == "Regular payment is closed"
+
+
 async def seed_due_subscription(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[Subscription, ResourceMembership]:
