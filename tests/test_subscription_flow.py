@@ -905,6 +905,10 @@ async def test_complete_subscription_lifecycle(
         def __init__(self) -> None:
             self.banned_users: list[int] = []
 
+        async def get_chat_member(self, **kwargs: Any) -> Any:
+            from types import SimpleNamespace
+            return SimpleNamespace(status="left")
+
         async def create_chat_invite_link(self, **kwargs: Any) -> FakeInvite:
             assert kwargs["creates_join_request"] is True
             assert "member_limit" not in kwargs

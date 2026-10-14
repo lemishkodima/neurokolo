@@ -31,6 +31,10 @@ from club_bot.services.subscriptions import SubscriptionService
 
 
 class FakeBot:
+    async def get_chat_member(self, **kwargs: Any) -> Any:
+        from types import SimpleNamespace
+        return SimpleNamespace(status="left")
+
     def __init__(self) -> None:
         self.removed: list[int] = []
         self.messages: list[tuple[int, str]] = []

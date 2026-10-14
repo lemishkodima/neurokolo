@@ -5,10 +5,11 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import escape
 from typing import Protocol
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -16,6 +17,7 @@ from sqlalchemy.orm import selectinload
 from club_bot.domain.enums import MembershipStatus, SubscriptionStatus
 from club_bot.domain.rules import as_utc, utc_now
 from club_bot.models import (
+    AccessEvent,
     Plan,
     ResourceMembership,
     Subscription,
@@ -23,12 +25,17 @@ from club_bot.models import (
     User,
     plan_resources,
 )
-from club_bot.repositories import SubscriptionRepository, UserRepository
+from club_bot.repositories import SubscriptionRepository
+from club_bot.services.admin import AdminService
 
 logger = logging.getLogger(__name__)
 
 
 class AccessDeniedError(PermissionError):
+    pass
+
+
+class AccessRecoveryError(RuntimeError):
     pass
 
 
@@ -66,16 +73,31 @@ class AccessService:
         invite_ttl_seconds: int,
         grace_period_hours: int,
         expiration_guard: ExpirationGuard | None = None,
+        admin_service: AdminService | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.bot = bot
         self.invite_ttl_seconds = invite_ttl_seconds
         self.grace_period_hours = grace_period_hours
         self.expiration_guard = expiration_guard
+        self.admin_service = admin_service
 
     async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
+        try:
+            return await self._create_invites(telegram_id)
+        except AccessDeniedError:
+            raise
+        except Exception as error:
+            reason = str(error) if isinstance(error, AccessRecoveryError) else type(error).__name__
+            await self._alert_access_error(telegram_id, reason)
+            raise AccessRecoveryError("Не вдалося підготувати доступ") from error
+
+    async def _create_invites(self, telegram_id: int) -> list[ResourceInvite]:
         async with self.session_factory() as session, session.begin():
-            user = await UserRepository(session).by_telegram_id(telegram_id)
+            # Serialize concurrent payment/menu requests, including the first invite.
+            user = await session.scalar(
+                select(User).where(User.telegram_id == telegram_id).with_for_update()
+            )
             if user is None:
                 raise AccessDeniedError
             now = utc_now()
@@ -111,12 +133,22 @@ class AccessService:
             invites: list[ResourceInvite] = []
             expires_at = now + timedelta(seconds=self.invite_ttl_seconds)
             for resource in resources:
+                await self._ensure_not_banned(resource.chat_id, telegram_id)
                 membership = await session.scalar(
                     select(ResourceMembership).where(
                         ResourceMembership.user_id == user.id,
                         ResourceMembership.resource_id == resource.id,
                     )
                 )
+                if (
+                    membership is not None
+                    and membership.status == MembershipStatus.INVITED
+                    and membership.invite_link
+                    and membership.invite_expires_at is not None
+                    and as_utc(membership.invite_expires_at) > now + timedelta(seconds=30)
+                ):
+                    invites.append(ResourceInvite(name=resource.name, url=membership.invite_link))
+                    continue
                 if membership is not None and membership.invite_link:
                     with suppress(TelegramBadRequest):
                         await self.bot.revoke_chat_invite_link(
@@ -142,6 +174,62 @@ class AccessService:
                 membership.revoked_at = None
                 invites.append(ResourceInvite(name=resource.name, url=link.invite_link))
             return invites
+
+    async def record_access_event(
+        self, chat_id: int, telegram_id: int, action: str,
+        *, actor_id: int | None = None, occurred_at: datetime | None = None,
+    ) -> None:
+        # No FK to the outer transaction: a Telegram side effect survives DB rollback.
+        async with self.session_factory() as session, session.begin():
+            session.add(AccessEvent(
+                chat_id=chat_id, telegram_id=telegram_id, action=action,
+                actor_id=actor_id, occurred_at=occurred_at or utc_now(),
+            ))
+
+    async def _owns_ban(self, chat_id: int, telegram_id: int) -> bool:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(AccessEvent).where(
+                    AccessEvent.chat_id == chat_id, AccessEvent.telegram_id == telegram_id,
+                    AccessEvent.action.in_(["bot_ban", "bot_unban", "manual_ban", "manual_unban"]),
+                ).order_by(AccessEvent.occurred_at.desc()).limit(1)
+            )
+            return event is not None and event.action == "bot_ban"
+
+    async def _ensure_not_banned(self, chat_id: int, telegram_id: int) -> None:
+        member = await self.bot.get_chat_member(chat_id=chat_id, user_id=telegram_id)
+        if member.status != "kicked":
+            return
+        if not await self._owns_ban(chat_id, telegram_id):
+            await self.record_access_event(chat_id, telegram_id, "unknown_or_manual_ban")
+            raise AccessRecoveryError("Блокування потребує перевірки адміністратора")
+        await self._verified_unban(chat_id, telegram_id)
+
+    async def _verified_unban(self, chat_id: int, telegram_id: int) -> None:
+        await self.record_access_event(chat_id, telegram_id, "unban_requested")
+        await self.bot.unban_chat_member(
+            chat_id=chat_id, user_id=telegram_id, only_if_banned=True,
+        )
+        member = await self.bot.get_chat_member(chat_id=chat_id, user_id=telegram_id)
+        if member.status == "kicked":
+            await self.record_access_event(chat_id, telegram_id, "unban_failed")
+            raise AccessRecoveryError("Telegram не підтвердив розблокування")
+        await self.record_access_event(chat_id, telegram_id, "bot_unban")
+
+    async def _alert_access_error(self, telegram_id: int, reason: str) -> None:
+        if self.admin_service is None:
+            return
+        for admin_id, _ in await self.admin_service.list_admins():
+            try:
+                await self.bot.send_message(
+                    admin_id,
+                    "⚠️ Не вдалося видати доступ до клубу.\n"
+                    f"Telegram ID: <code>{telegram_id}</code>\n"
+                    f"Причина: {escape(reason)}. Перевірте блокування та права бота.\n"
+                    "Користувач може повторити «Доєднатися» після усунення причини.",
+                )
+            except TelegramAPIError:
+                logger.exception("Could not deliver access alert to admin %s", admin_id)
 
     async def handle_join_request(
         self,
@@ -382,6 +470,13 @@ class AccessService:
                     "Could not revoke expired subscription %s; continuing with the batch",
                     subscription_id,
                 )
+                async with self.session_factory() as session:
+                    telegram_id = await session.scalar(
+                        select(User.telegram_id).join(Subscription, Subscription.user_id == User.id)
+                        .where(Subscription.id == subscription_id)
+                    )
+                if telegram_id is not None:
+                    await self._alert_access_error(telegram_id, "Помилка відкликання/розблокування")
                 continue
             if fully_revoked:
                 revoked += 1
@@ -389,17 +484,18 @@ class AccessService:
 
     async def _remove_member(self, resource: TelegramResource, telegram_id: int) -> bool:
         try:
+            member = await self.bot.get_chat_member(chat_id=resource.chat_id, user_id=telegram_id)
+            if member.status == "kicked":
+                if await self._owns_ban(resource.chat_id, telegram_id):
+                    await self._verified_unban(resource.chat_id, telegram_id)
+                return True
+            await self.record_access_event(resource.chat_id, telegram_id, "ban_requested")
             await self.bot.ban_chat_member(chat_id=resource.chat_id, user_id=telegram_id)
-            await self.bot.unban_chat_member(
-                chat_id=resource.chat_id,
-                user_id=telegram_id,
-                only_if_banned=True,
-            )
+            await self.record_access_event(resource.chat_id, telegram_id, "bot_ban")
+            await self._verified_unban(resource.chat_id, telegram_id)
             return True
         except TelegramBadRequest as error:
             message = str(error).casefold()
-            if "user not found" in message:
-                return True
             if "can't remove chat owner" in message:
                 logger.error(
                     "Cannot revoke Telegram owner %s from resource %s (%s)",

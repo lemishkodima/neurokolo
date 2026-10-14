@@ -239,6 +239,18 @@ class ResourceMembership(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AccessEvent(Base):
+    __tablename__ = "access_events"
+    __table_args__ = (Index("ix_access_events_member", "chat_id", "telegram_id", "occurred_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    telegram_id: Mapped[int] = mapped_column(BigInteger)
+    actor_id: Mapped[int | None] = mapped_column(BigInteger)
+    action: Mapped[str] = mapped_column(String(40))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Referral(TimestampMixin, Base):
     __tablename__ = "referrals"
 

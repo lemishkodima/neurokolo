@@ -113,14 +113,15 @@ def build_container(settings: Settings) -> Container:
         default_return_url=settings.membership_site_url,
         regular_count=settings.wayforpay_regular_count,
     )
+    admin_service = AdminService(session_factory, settings.admin_telegram_ids)
     access_service = AccessService(
         session_factory,
         bot,
         invite_ttl_seconds=settings.invite_ttl_seconds,
         grace_period_hours=settings.payment_grace_period_hours,
         expiration_guard=subscription_service,
+        admin_service=admin_service,
     )
-    admin_service = AdminService(session_factory, settings.admin_telegram_ids)
     catalog_service = CatalogService(session_factory, default_plan_code=settings.default_plan_code)
     settings_service = SettingsService(session_factory)
     broadcast_service = BroadcastService(

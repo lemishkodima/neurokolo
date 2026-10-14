@@ -37,6 +37,13 @@ FastAPI, PostgreSQL and WayForPay recurring payments.
 
 ## Architecture
 
+Before issuing an invite, the bot checks the user's live Telegram membership. It only
+removes a ban with recorded bot provenance and verifies that Telegram has cleared it.
+Manual or unknown historical bans require administrator review. Moderation operations
+and `chat_member` updates are recorded in `access_events`, independently of subscription
+transactions. Repeated join/payment requests reuse an unexpired personal invite and are
+serialized per user in PostgreSQL. Access preparation failures notify administrators.
+
 ```text
 src/club_bot/
 ├── api.py                  FastAPI endpoints and webhook authentication

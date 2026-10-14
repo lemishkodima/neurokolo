@@ -19,7 +19,7 @@ from club_bot.bot.keyboards import (
 from club_bot.config import Settings
 from club_bot.domain.billing import billing_period_label
 from club_bot.integrations.wayforpay import WayForPayError
-from club_bot.services.access import AccessDeniedError, AccessService
+from club_bot.services.access import AccessDeniedError, AccessRecoveryError, AccessService
 from club_bot.services.admin import CatalogService, SettingsService
 from club_bot.services.checkout_links import (
     add_query_parameter,
@@ -113,6 +113,12 @@ async def join(
         invites = await access_service.create_invites(message.from_user.id)
     except AccessDeniedError:
         invites = None
+    except AccessRecoveryError:
+        await message.answer(
+            "Підписка активна, але не вдалося підготувати вхід до каналу. "
+            "Адміністратора повідомлено. Повторна оплата не потрібна."
+        )
+        return
 
     if invites is not None:
         invite_buttons = [

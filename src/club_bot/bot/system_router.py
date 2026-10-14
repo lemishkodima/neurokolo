@@ -14,6 +14,22 @@ system_router = Router(name="system")
 logger = logging.getLogger(__name__)
 
 
+@system_router.chat_member()
+async def track_member_moderation(
+    event: ChatMemberUpdated, bot: Bot, access_service: AccessService,
+) -> None:
+    old = event.old_chat_member.status
+    new = event.new_chat_member.status
+    if new != ChatMemberStatus.KICKED and old != ChatMemberStatus.KICKED:
+        return
+    actor = "bot" if event.from_user.id == bot.id else "manual"
+    action = "ban" if new == ChatMemberStatus.KICKED else "unban"
+    await access_service.record_access_event(
+        event.chat.id, event.new_chat_member.user.id, f"{actor}_{action}",
+        actor_id=event.from_user.id, occurred_at=event.date,
+    )
+
+
 @system_router.chat_join_request()
 async def review_join_request(
     event: ChatJoinRequest,

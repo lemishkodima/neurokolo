@@ -4,11 +4,13 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from club_bot.bot.system_router import review_join_request, system_router
+from club_bot.bot.system_router import review_join_request, system_router, track_member_moderation
 from club_bot.db import create_engine, create_session_factory
 from club_bot.domain.enums import MembershipStatus, ResourceType, SubscriptionStatus
 from club_bot.domain.rules import utc_now
@@ -20,10 +22,19 @@ from club_bot.models import (
     TelegramResource,
     User,
 )
-from club_bot.services.access import AccessService
+from club_bot.services.access import AccessRecoveryError, AccessService
 
 
 class FakeBot:
+    status = "left"
+
+    async def get_chat_member(self, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(status=self.status)
+
+    async def unban_chat_member(self, **kwargs: Any) -> None:
+        assert kwargs["only_if_banned"] is True
+        self.status = "left"
+
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.revoked: list[tuple[int, str]] = []
@@ -101,7 +112,7 @@ async def _access_service(
     return engine, session_factory, access, bot, subscription_id
 
 
-async def test_join_request_invite_replaces_old_link_and_approves_only_owner(
+async def test_join_request_invite_reuses_current_link_and_approves_only_owner(
     tmp_path: Path,
 ) -> None:
     engine, session_factory, access, bot, _subscription_id = await _access_service(tmp_path)
@@ -110,10 +121,11 @@ async def test_join_request_invite_replaces_old_link_and_approves_only_owner(
     second = await access.create_invites(123)
 
     assert first[0].url == "https://t.me/+personal-1"
-    assert second[0].url == "https://t.me/+personal-2"
+    assert second[0].url == first[0].url
+    assert len(bot.created) == 1
     assert bot.created[0]["creates_join_request"] is True
     assert "member_limit" not in bot.created[0]
-    assert bot.revoked == [(-100123, first[0].url)]
+    assert bot.revoked == []
 
     assert await access.handle_join_request(
         chat_id=-100123,
@@ -210,3 +222,88 @@ async def test_system_router_forwards_join_request_identity_and_link() -> None:
         "invite_link": "https://t.me/+personal",
     }
     assert "chat_join_request" in system_router.resolve_used_update_types()
+
+
+async def test_paid_returning_user_is_unbanned_before_invite(tmp_path: Path) -> None:
+    engine, _, access, bot, _ = await _access_service(tmp_path)
+    bot.status = "kicked"
+    await access.record_access_event(-100123, 123, "bot_ban")
+    invites = await access.create_invites(123)
+    assert bot.status == "left"
+    assert invites
+    assert not await access._owns_ban(-100123, 123)
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("source", [None, "manual_ban"])
+async def test_unknown_and_manual_bans_are_preserved(tmp_path: Path, source: str | None) -> None:
+    engine, _, access, bot, _ = await _access_service(tmp_path)
+    bot.status = "kicked"
+    if source:
+        await access.record_access_event(-100123, 123, "bot_ban")
+        await access.record_access_event(-100123, 123, source, actor_id=999)
+    admins = SimpleNamespace(list_admins=AsyncMock(return_value=[(999, True)]))
+    access.admin_service = admins  # type: ignore[assignment]
+    bot.send_message = AsyncMock()  # type: ignore[attr-defined]
+    with pytest.raises(AccessRecoveryError):
+        await access.create_invites(123)
+    assert bot.status == "kicked"
+    assert bot.created == []
+    bot.send_message.assert_awaited_once()  # type: ignore[attr-defined]
+    await engine.dispose()
+
+
+async def test_unban_requires_confirmation_and_can_be_retried(tmp_path: Path) -> None:
+    engine, _, access, bot, _ = await _access_service(tmp_path)
+    bot.status = "kicked"
+    await access.record_access_event(-100123, 123, "bot_ban")
+    original = bot.unban_chat_member
+    bot.unban_chat_member = AsyncMock()  # type: ignore[method-assign]
+    with pytest.raises(AccessRecoveryError):
+        await access.create_invites(123)
+    assert bot.created == []
+    assert await access._owns_ban(-100123, 123)
+    bot.unban_chat_member = original  # type: ignore[method-assign]
+    assert await access.create_invites(123)
+    await engine.dispose()
+
+
+async def test_expired_invite_is_replaced(tmp_path: Path) -> None:
+    engine, factory, access, bot, _ = await _access_service(tmp_path)
+    first = (await access.create_invites(123))[0]
+    async with factory() as session, session.begin():
+        member = await session.scalar(select(ResourceMembership))
+        assert member
+        member.invite_expires_at = utc_now() - timedelta(seconds=1)
+    second = (await access.create_invites(123))[0]
+    assert first.url != second.url
+    assert bot.revoked == [(-100123, first.url)]
+    await engine.dispose()
+
+
+async def test_moderation_update_records_manual_actor(tmp_path: Path) -> None:
+    engine, _, access, _, _ = await _access_service(tmp_path)
+    await access.record_access_event(-100123, 123, "bot_ban")
+    event = SimpleNamespace(
+        chat=SimpleNamespace(id=-100123), from_user=SimpleNamespace(id=999),
+        old_chat_member=SimpleNamespace(status="left"),
+        new_chat_member=SimpleNamespace(status="kicked", user=SimpleNamespace(id=123)),
+        date=utc_now(),
+    )
+    await track_member_moderation(event, SimpleNamespace(id=888), access)  # type: ignore[arg-type]
+    assert not await access._owns_ban(-100123, 123)
+    assert "chat_member" in system_router.resolve_used_update_types()
+    await engine.dispose()
+
+
+async def test_failed_unban_preserves_bot_provenance_after_outer_rollback(tmp_path: Path) -> None:
+    engine, factory, access, bot, _ = await _access_service(tmp_path)
+    bot.ban_chat_member = AsyncMock()  # type: ignore[attr-defined]
+    bot.unban_chat_member = AsyncMock(side_effect=RuntimeError("network"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        async with factory() as session, session.begin():
+            resource = await session.scalar(select(TelegramResource))
+            assert resource
+            await access._remove_member(resource, 123)
+    assert await access._owns_ban(-100123, 123)
+    await engine.dispose()

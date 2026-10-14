@@ -98,7 +98,10 @@ class SubscriptionNotificationService:
                 "підтвердить лише ваш Telegram-акаунт; посилання персональне."
             )
         else:
-            text += "\n\nВідкрити доступ можна через кнопку «Матеріали»."
+            text += (
+                "\n\nНе вдалося підготувати посилання входу. Адміністратора повідомлено. "
+                "Повторна оплата не потрібна; спробуйте «Доєднатися» після вирішення проблеми."
+            )
         try:
             await self.bot.send_message(telegram_id, text, reply_markup=markup)
         except TelegramAPIError:

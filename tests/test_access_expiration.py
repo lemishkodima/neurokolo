@@ -28,6 +28,10 @@ from club_bot.services.access import AccessService
 
 
 class FakeBot:
+    async def get_chat_member(self, **kwargs: Any) -> Any:
+        from types import SimpleNamespace
+        return SimpleNamespace(status="left")
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, int, int]] = []
 
