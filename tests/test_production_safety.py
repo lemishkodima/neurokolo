@@ -248,7 +248,7 @@ async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> 
         )
         tampered_page = await client.get(
             "/checkout",
-            params={"owner": f"{owner_token[:-1]}x"},
+            params={"owner": f"{owner_token}AA"},
         )
 
     assert payment_page.status_code == 200

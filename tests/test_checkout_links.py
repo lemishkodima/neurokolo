@@ -15,7 +15,7 @@ def test_personal_checkout_token_is_signed_and_expires() -> None:
 
     assert verify_personal_checkout_token(token, "internal-secret", now=1_001) == 501
     with pytest.raises(InvalidPersonalCheckoutToken):
-        verify_personal_checkout_token(f"{token[:-1]}x", "internal-secret", now=1_001)
+        verify_personal_checkout_token(f"{token}AA", "internal-secret", now=1_001)
     with pytest.raises(InvalidPersonalCheckoutToken):
         verify_personal_checkout_token(token, "different-secret", now=1_001)
     with pytest.raises(InvalidPersonalCheckoutToken, match="expired"):
