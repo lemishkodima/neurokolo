@@ -236,7 +236,10 @@ async def test_paid_returning_user_is_unbanned_before_invite(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("source", [None, "manual_ban"])
-async def test_unknown_and_manual_bans_are_preserved(tmp_path: Path, source: str | None) -> None:
+@pytest.mark.parametrize("alerts_enabled", [True, False])
+async def test_unknown_and_manual_bans_are_preserved(
+    tmp_path: Path, source: str | None, alerts_enabled: bool
+) -> None:
     engine, _, access, bot, _ = await _access_service(tmp_path)
     bot.status = "kicked"
     if source:
@@ -244,12 +247,13 @@ async def test_unknown_and_manual_bans_are_preserved(tmp_path: Path, source: str
         await access.record_access_event(-100123, 123, source, actor_id=999)
     admins = SimpleNamespace(list_admins=AsyncMock(return_value=[(999, True)]))
     access.admin_service = admins  # type: ignore[assignment]
+    access.admin_alerts_enabled = alerts_enabled
     bot.send_message = AsyncMock()  # type: ignore[attr-defined]
     with pytest.raises(AccessRecoveryError):
         await access.create_invites(123)
     assert bot.status == "kicked"
     assert bot.created == []
-    bot.send_message.assert_awaited_once()  # type: ignore[attr-defined]
+    assert bot.send_message.await_count == int(alerts_enabled)  # type: ignore[attr-defined]
     await engine.dispose()
 
 

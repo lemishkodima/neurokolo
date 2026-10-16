@@ -121,6 +121,7 @@ def build_container(settings: Settings) -> Container:
         grace_period_hours=settings.payment_grace_period_hours,
         expiration_guard=subscription_service,
         admin_service=admin_service,
+        admin_alerts_enabled=settings.access_error_admin_alerts_enabled,
     )
     catalog_service = CatalogService(session_factory, default_plan_code=settings.default_plan_code)
     settings_service = SettingsService(session_factory)

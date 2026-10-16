@@ -379,6 +379,10 @@ legacy expired production subscription and suspends only rules that WayForPay st
 
 ## Production notes
 
+- Access failure admin notifications are muted by default. Set
+  `ACCESS_ERROR_ADMIN_ALERTS_ENABLED=true` to enable them. Access checks, retries,
+  audit history and error logging continue while notifications are muted.
+
 - Use `compose.production.yml`; it runs Caddy, PostgreSQL, migrations, API, one worker, verified
   backups, and Prometheus. Detailed server instructions are in `ops/README.md`.
 - Copy `.env.production.example` to `.env.production` and create the file-based Docker secrets

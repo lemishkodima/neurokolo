@@ -74,6 +74,7 @@ class AccessService:
         grace_period_hours: int,
         expiration_guard: ExpirationGuard | None = None,
         admin_service: AdminService | None = None,
+        admin_alerts_enabled: bool = True,
     ) -> None:
         self.session_factory = session_factory
         self.bot = bot
@@ -81,6 +82,7 @@ class AccessService:
         self.grace_period_hours = grace_period_hours
         self.expiration_guard = expiration_guard
         self.admin_service = admin_service
+        self.admin_alerts_enabled = admin_alerts_enabled
 
     async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
         try:
@@ -217,6 +219,9 @@ class AccessService:
         await self.record_access_event(chat_id, telegram_id, "bot_unban")
 
     async def _alert_access_error(self, telegram_id: int, reason: str) -> None:
+        if not self.admin_alerts_enabled:
+            logger.warning("Access alert muted for Telegram ID %s: %s", telegram_id, reason)
+            return
         if self.admin_service is None:
             return
         for admin_id, _ in await self.admin_service.list_admins():
