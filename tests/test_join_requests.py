@@ -7,6 +7,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -269,6 +271,81 @@ async def test_unban_requires_confirmation_and_can_be_retried(tmp_path: Path) ->
     assert await access._owns_ban(-100123, 123)
     bot.unban_chat_member = original  # type: ignore[method-assign]
     assert await access.create_invites(123)
+    await engine.dispose()
+
+
+async def test_grant_alert_recovers_once_across_restart(tmp_path: Path) -> None:
+    engine, factory, access, bot, _ = await _access_service(tmp_path)
+    admins = SimpleNamespace(list_admins=AsyncMock(return_value=[(999, True)]))
+    access.admin_service = admins  # type: ignore[assignment]
+    bot.send_message = AsyncMock()  # type: ignore[attr-defined]
+    bot.status = "kicked"
+    for _ in range(2):
+        with pytest.raises(AccessRecoveryError):
+            await access.create_invites(123)
+    assert bot.send_message.await_count == 1
+    assert "Помилка видачі" in bot.send_message.call_args.args[1]
+    restarted = AccessService(
+        factory, bot, invite_ttl_seconds=3600, grace_period_hours=0,
+        admin_service=admins,  # type: ignore[arg-type]
+    )
+    bot.status = "left"
+    await restarted.create_invites(123)
+    assert bot.send_message.await_count == 2
+    assert "Проблему вирішено: видача" in bot.send_message.call_args.args[1]
+    await restarted.create_invites(123)
+    await restarted.deliver_access_resolutions()
+    assert bot.send_message.await_count == 2
+    await engine.dispose()
+
+
+async def test_revoke_alert_and_recovery_delivery_retry(tmp_path: Path) -> None:
+    engine, factory, access, bot, subscription_id = await _access_service(tmp_path)
+    access.admin_service = SimpleNamespace(  # type: ignore[assignment]
+        list_admins=AsyncMock(return_value=[(999, True)]),
+    )
+    bot.send_message = AsyncMock()  # type: ignore[attr-defined]
+    async with factory() as session, session.begin():
+        sub = await session.get(Subscription, subscription_id)
+        assert sub is not None
+        sub.current_period_end = utc_now() - timedelta(days=2)
+    bot.ban_chat_member = AsyncMock()  # type: ignore[attr-defined]
+    original = bot.unban_chat_member
+    bot.unban_chat_member = AsyncMock(side_effect=RuntimeError("transient"))
+    assert await access.expire_due(grace_period_hours=0) == 0
+    assert "Помилка відкликання" in bot.send_message.call_args.args[1]
+    assert "Доєднатися" not in bot.send_message.call_args.args[1]
+    await access.expire_due(grace_period_hours=0)
+    assert bot.send_message.await_count == 1
+    bot.unban_chat_member = original
+    assert await access.expire_due(grace_period_hours=0) == 1
+    bot.send_message.side_effect = TelegramBadRequest(
+        method=SendMessage(chat_id=999, text="test"), message="temporary",
+    )
+    await access.deliver_access_resolutions()
+    bot.send_message.side_effect = None
+    await access.deliver_access_resolutions()
+    assert "Проблему вирішено: відкликання" in bot.send_message.call_args.args[1]
+    count = bot.send_message.await_count
+    await access.deliver_access_resolutions()
+    assert bot.send_message.await_count == count
+    await engine.dispose()
+
+
+async def test_no_resolution_without_delivered_alert(tmp_path: Path) -> None:
+    engine, _, access, bot, _ = await _access_service(tmp_path)
+    access.admin_service = SimpleNamespace(  # type: ignore[assignment]
+        list_admins=AsyncMock(return_value=[(999, True)]),
+    )
+    bot.send_message = AsyncMock()  # type: ignore[attr-defined]
+    access.admin_alerts_enabled = False
+    bot.status = "kicked"
+    with pytest.raises(AccessRecoveryError):
+        await access.create_invites(123)
+    access.admin_alerts_enabled = True
+    bot.status = "left"
+    await access.create_invites(123)
+    bot.send_message.assert_not_awaited()
     await engine.dispose()
 
 

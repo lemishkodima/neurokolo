@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
-from typing import Protocol
+from typing import Any, Protocol
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -18,6 +19,7 @@ from club_bot.domain.enums import MembershipStatus, SubscriptionStatus
 from club_bot.domain.rules import as_utc, utc_now
 from club_bot.models import (
     AccessEvent,
+    AppSetting,
     Plan,
     ResourceMembership,
     Subscription,
@@ -86,13 +88,16 @@ class AccessService:
 
     async def create_invites(self, telegram_id: int) -> list[ResourceInvite]:
         try:
-            return await self._create_invites(telegram_id)
+            invites = await self._create_invites(telegram_id)
         except AccessDeniedError:
             raise
         except Exception as error:
             reason = str(error) if isinstance(error, AccessRecoveryError) else type(error).__name__
             await self._alert_access_error(telegram_id, reason)
             raise AccessRecoveryError("Не вдалося підготувати доступ") from error
+        if invites:
+            await self._resolve_access_alert(f"grant:{telegram_id}")
+        return invites
 
     async def _create_invites(self, telegram_id: int) -> list[ResourceInvite]:
         async with self.session_factory() as session, session.begin():
@@ -218,23 +223,114 @@ class AccessService:
             raise AccessRecoveryError("Telegram не підтвердив розблокування")
         await self.record_access_event(chat_id, telegram_id, "bot_unban")
 
-    async def _alert_access_error(self, telegram_id: int, reason: str) -> None:
+    async def _alert_access_error(
+        self, telegram_id: int, reason: str, *, subscription_id: object | None = None,
+    ) -> None:
         if not self.admin_alerts_enabled:
             logger.warning("Access alert muted for Telegram ID %s: %s", telegram_id, reason)
             return
         if self.admin_service is None:
             return
-        for admin_id, _ in await self.admin_service.list_admins():
-            try:
-                await self.bot.send_message(
-                    admin_id,
-                    "⚠️ Не вдалося видати доступ до клубу.\n"
-                    f"Telegram ID: <code>{telegram_id}</code>\n"
-                    f"Причина: {escape(reason)}. Перевірте блокування та права бота.\n"
-                    "Користувач може повторити «Доєднатися» після усунення причини.",
+        operation = "revoke" if subscription_id is not None else "grant"
+        scope = (f"revoke:{subscription_id}" if subscription_id is not None
+                 else f"grant:{telegram_id}")
+        try:
+            admins = await self.admin_service.list_admins()
+            async with self.session_factory() as session, session.begin():
+                await session.scalar(select(User).where(
+                    User.telegram_id == telegram_id,
+                ).with_for_update())
+                key = f"access_notice:{scope}"
+                setting = await session.get(AppSetting, key, with_for_update=True)
+                if setting is None:
+                    setting = AppSetting(key=key, value="{}")
+                    session.add(setting)
+                    state: dict[str, Any] = {"telegram_id": telegram_id, "operation": operation,
+                             "notified": [], "resolved": False}
+                else:
+                    state = json.loads(setting.value)
+                title = ("⚠️ Помилка відкликання доступу до клубу." if operation == "revoke"
+                         else "⚠️ Помилка видачі доступу до клубу.")
+                detail = (
+                    "Не вдалося завершити видалення з каналу або перевірку розблокування. "
+                    "Це не видача доступу після оплати. Бот повторить спробу автоматично."
+                    if operation == "revoke" else
+                    "Не вдалося підготувати персональне посилання входу. "
+                    "Повторна оплата не потрібна. Після усунення причини користувач "
+                    "може повторити «Доєднатися»."
                 )
-            except TelegramAPIError:
-                logger.exception("Could not deliver access alert to admin %s", admin_id)
+                for admin_id, _ in admins:
+                    if admin_id in state["notified"]:
+                        continue
+                    try:
+                        await self.bot.send_message(
+                            admin_id, f"{title}\nTelegram ID: <code>{telegram_id}</code>\n"
+                            f"Причина: {escape(reason)}.\n{detail}",
+                        )
+                        state["notified"].append(admin_id)
+                    except TelegramAPIError:
+                        logger.exception("Could not deliver access alert to admin %s", admin_id)
+                setting.value = json.dumps(state)
+        except Exception:
+            logger.exception("Could not persist access alert %s", scope)
+
+    async def _resolve_access_alert(self, scope: str) -> None:
+        try:
+            async with self.session_factory() as session, session.begin():
+                await self._mark_access_alert_resolved(session, scope)
+            await self.deliver_access_resolutions()
+        except Exception:
+            logger.exception("Could not resolve access alert %s", scope)
+
+    async def _mark_access_alert_resolved(self, session: AsyncSession, scope: str) -> None:
+        setting = await session.get(AppSetting, f"access_notice:{scope}", with_for_update=True)
+        if setting is not None:
+            state = json.loads(setting.value)
+            state["resolved"] = True
+            setting.value = json.dumps(state)
+
+    async def deliver_access_resolutions(self) -> None:
+        if not self.admin_alerts_enabled or self.admin_service is None:
+            return
+        admins = {item[0] for item in await self.admin_service.list_admins()}
+        async with self.session_factory() as session:
+            keys = list((await session.scalars(select(AppSetting.key).where(
+                AppSetting.key.startswith("access_notice:"),
+            ))).all())
+        for key in keys:
+            async with self.session_factory() as session, session.begin():
+                setting = await session.get(AppSetting, key, with_for_update=True)
+                if setting is None:
+                    continue
+                state = json.loads(setting.value)
+                if not state["resolved"]:
+                    continue
+                detail = (
+                    "Операцію відкликання доступу завершено. Розблокування після "
+                    "видалення не повертає користувача в канал."
+                    if state["operation"] == "revoke" else
+                    "Персональне посилання входу успішно підготовлено. "
+                    "Це ще не підтвердження фактичного вступу користувача в канал."
+                )
+                pending = []
+                for admin_id in state["notified"]:
+                    if admin_id not in admins:
+                        continue
+                    try:
+                        await self.bot.send_message(
+                            admin_id, "✅ Проблему вирішено: "
+                            + ("відкликання доступу" if state["operation"] == "revoke"
+                               else "видача доступу")
+                            + f".\nTelegram ID: <code>{state['telegram_id']}</code>\n{detail}",
+                        )
+                    except TelegramAPIError:
+                        pending.append(admin_id)
+                        logger.exception("Could not deliver access recovery to admin %s", admin_id)
+                if pending:
+                    state["notified"] = pending
+                    setting.value = json.dumps(state)
+                else:
+                    await session.delete(setting)
 
     async def handle_join_request(
         self,
@@ -447,6 +543,8 @@ class AccessService:
                     membership.invite_link = None
             subscription.status = SubscriptionStatus.EXPIRED
             subscription.access_revoked_at = utc_now() if fully_revoked else None
+            if fully_revoked:
+                await self._mark_access_alert_resolved(session, f"revoke:{subscription_id}")
             return fully_revoked
 
     async def expire_due(self, *, grace_period_hours: int, limit: int = 100) -> int:
@@ -470,7 +568,7 @@ class AccessService:
                     subscription_id,
                     entitlement_cutoff=cutoff,
                 )
-            except Exception:
+            except Exception as error:
                 logger.exception(
                     "Could not revoke expired subscription %s; continuing with the batch",
                     subscription_id,
@@ -481,7 +579,11 @@ class AccessService:
                         .where(Subscription.id == subscription_id)
                     )
                 if telegram_id is not None:
-                    await self._alert_access_error(telegram_id, "Помилка відкликання/розблокування")
+                    reason = (str(error) if isinstance(error, AccessRecoveryError)
+                              else type(error).__name__)
+                    await self._alert_access_error(
+                        telegram_id, reason, subscription_id=subscription_id,
+                    )
                 continue
             if fully_revoked:
                 revoked += 1

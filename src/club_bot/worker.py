@@ -62,6 +62,10 @@ async def _worker() -> None:
             except Exception:
                 logger.exception("Subscription expiration cycle failed")
             try:
+                await container.access_service.deliver_access_resolutions()
+            except Exception:
+                logger.exception("Access recovery notification cycle failed")
+            try:
                 count = (
                     await container.subscription_notification_service
                     .send_access_revoked_notifications()
