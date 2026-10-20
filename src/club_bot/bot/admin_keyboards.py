@@ -67,6 +67,12 @@ def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
 def plan_actions_keyboard(plan: Plan, *, can_archive: bool) -> InlineKeyboardMarkup:
     rows = [
         [
+            InlineKeyboardButton(text="🎁 Тріал", callback_data=f"adm:plan_trial:{plan.id}"),
+            InlineKeyboardButton(
+                text="🔗 Оплата з сайту", callback_data=f"adm:plan_link:{plan.id}",
+            ),
+        ],
+        [
             InlineKeyboardButton(
                 text="✏️ Змінити назву",
                 callback_data=f"adm:plan_name:{plan.id}",

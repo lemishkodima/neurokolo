@@ -330,6 +330,7 @@ async def test_join_button_contains_signed_personal_checkout_owner() -> None:
                     code="club",
                     name="Клуб",
                     price=Decimal("990"),
+                    trial_price=None,
                     currency="UAH",
                     billing_months=1,
                 )
@@ -380,6 +381,7 @@ async def test_join_offers_every_active_plan_when_multiple_are_available() -> No
                     code="monthly",
                     name="Щомісячний",
                     price=Decimal("990"),
+                    trial_price=None,
                     currency="UAH",
                     billing_months=1,
                 ),
@@ -387,6 +389,7 @@ async def test_join_offers_every_active_plan_when_multiple_are_available() -> No
                     code="quarter",
                     name="Квартальний",
                     price=Decimal("2490"),
+                    trial_price=None,
                     currency="UAH",
                     billing_months=3,
                 ),

@@ -11,6 +11,7 @@ class PlanEditStates(StatesGroup):
     name = State()
     price = State()
     duration = State()
+    trial = State()
 
 
 class AdminAddStates(StatesGroup):

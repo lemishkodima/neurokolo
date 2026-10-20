@@ -323,6 +323,25 @@ NEUROKOLO_VENV=/Users/mac/Library/Caches/neurokolo/venv
 
 ## Правила продовження розробки
 
+### Пільговий перший платіж і checkout до запуску бота (rc21)
+
+- Plan зберігає nullable `trial_price` і `trial_months` (1/2/3/6/12); адміністратор
+  задає їх через «🎁 Тріал», наприклад `10 1`, або вимикає словом `вимкнути`.
+- CheckoutSession фіксує першу `amount`, звичайну `recurring_amount`,
+  `initial_months` і звичайний `billing_months`. Старі nullable snapshots мають
+  fallback на старі amount/billing_months. Чинні підписки не переоцінюються.
+- WayForPay отримує першу amount, звичайну regularAmount і dateNext після
+  initial_months. Перший Approved перевіряється за першою сумою; _WFPREG продовження —
+  за звичайною. Період доступу починається з оплати, не з моменту claim.
+- Адмінська кнопка «🔗 Оплата з сайту» дає публічний `/checkout?plan_code=...`.
+  Telegram користувач не потрібен до оплати. Після callback особистий claim URL
+  прив'язує оплату одному акаунту; return URL без callback не видає доступ.
+- Відкладені валідні renewal callbacks анонімного checkout зберігаються до claim
+  і застосовуються один раз. Після paid claim перевіряється regular STATUS.
+- Для вже відомого акаунта попередній оплачений тріал вимикає нову знижку.
+  Анонімна покупка не гарантує один тріал на особу: Telegram ID невідомий до claim.
+  Claim-посилання секретне (bearer): його не можна публікувати замість checkout URL.
+
 1. Не видавати доступ на основі redirect/return URL — тільки після валідного
    підписаного callback WayForPay.
 2. WayForPay не керує Telegram напряму: callback змінює subscription state,

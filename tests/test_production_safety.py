@@ -144,6 +144,7 @@ async def test_public_checkout_posts_signed_fields_and_returns_to_claim_link() -
         subscription_service=SimpleNamespace(
             create_checkout=create_checkout,
             checkout_owner_telegram_id_by_token=AsyncMock(return_value=None),
+            checkout_status_by_token=AsyncMock(return_value="paid"),
         ),
         settings_service=SimpleNamespace(payment_test_mode_active=AsyncMock(return_value=False)),
     )
@@ -228,6 +229,7 @@ async def test_personal_checkout_is_prebound_and_completion_needs_no_claim() -> 
         subscription_service=SimpleNamespace(
             create_checkout=create_checkout,
             checkout_owner_telegram_id_by_token=owner_lookup,
+            checkout_status_by_token=AsyncMock(return_value="claimed"),
         ),
         settings_service=SimpleNamespace(payment_test_mode_active=AsyncMock(return_value=False)),
     )

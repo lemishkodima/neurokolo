@@ -64,6 +64,7 @@ class WayForPayClient:
         date_next: datetime,
         regular_count: int,
         regular_mode: str = "monthly",
+        regular_amount: Decimal | None = None,
         email: str | None = None,
         phone: str | None = None,
     ) -> dict[str, Any]:
@@ -104,7 +105,9 @@ class WayForPayClient:
             "language": "UA",
             "regularBehavior": "preset",
             "regularMode": regular_mode,
-            "regularAmount": amount_text,
+            "regularAmount": money_to_string(
+                regular_amount if regular_amount is not None else amount,
+            ),
             "regularOn": 1,
             "dateNext": date_next.strftime("%d.%m.%Y"),
             "regularCount": regular_count,

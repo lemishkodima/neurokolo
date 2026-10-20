@@ -5,7 +5,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from html import escape
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
@@ -102,11 +102,17 @@ async def _authorized(event: Message | CallbackQuery, admin_service: AdminServic
 
 
 def _plan_details(plan: Plan) -> str:
+    trial = (
+        f"Тріал: <b>{plan.trial_price} {plan.currency}</b> за "
+        f"{billing_period_label(plan.trial_months)}; далі звичайна ціна.\n"
+        if plan.trial_price is not None else "Тріал: вимкнено.\n"
+    )
     return (
         f"<b>{escape(plan.name)}</b>\n"
         f"Ціна: <b>{plan.price} {plan.currency}</b> за "
         f"<b>{billing_period_label(plan.billing_months)}</b>\n"
         f"Автопродовження: кожні <b>{billing_period_label(plan.billing_months)}</b>\n"
+        f"{trial}"
         f"Ресурсів: <b>{len(plan.resources)}</b>\n"
         f"Код: <code>{escape(plan.code)}</code>\n\n"
         "Оберіть, що потрібно змінити."
@@ -346,6 +352,87 @@ async def toggle_plan_resource(
             reply_markup=plan_resources_keyboard(resources, plan_id=plan_id)
         )
     await callback.answer("Додано" if selected else "Прибрано")
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_link:"))
+async def payment_plan_link(
+    callback: CallbackQuery, admin_service: AdminService, catalog_service: CatalogService,
+    settings: Settings,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan = await catalog_service.get_plan(uuid.UUID(callback.data.rsplit(":", 1)[1]))
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф недоступний", show_alert=True)
+        return
+    url = f"{settings.public_base_url.rstrip('/')}/checkout?{urlencode({'plan_code': plan.code})}"
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"🔗 Посилання оплати тарифу «{escape(plan.name)}»:\n<code>{escape(url)}</code>\n\n"
+            "Розмістіть його на сайті або іншій платформі. Кожен перехід створює "
+            "окреме замовлення. Після оплати покупець отримує персональну кнопку "
+            "переходу в бота. Доступ активується лише після підтвердження WayForPay.\n\n"
+            "Публікуйте лише це посилання, не персональне посилання активації після оплати. "
+            "Для анонімних покупців повторний тріал за Telegram ID до оплати не перевіряється. "
+            "Перед публікацією вимкніть глобальний тестовий режим.",
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm:plan_trial:"))
+async def edit_plan_trial(
+    callback: CallbackQuery, admin_service: AdminService, catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    plan = await catalog_service.get_plan(uuid.UUID(callback.data.rsplit(":", 1)[1]))
+    if plan is None or not plan.is_active:
+        await callback.answer("Тариф недоступний", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(selected_plan_id=str(plan.id))
+    await state.set_state(PlanEditStates.trial)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Введіть першу ціну та кількість місяців через пробіл, наприклад: <code>10 1</code>.\n"
+            f"Далі: {plan.price} {plan.currency} кожні {plan.billing_months} міс.\n"
+            "Тривалість: 1, 2, 3, 6 або 12 місяців. Ціна більша за нуль і менша за звичайну.\n"
+            "Для вимкнення надішліть <code>вимкнути</code>. Зміни стосуються лише нових оплат.",
+        )
+    await callback.answer()
+
+
+@admin_router.message(PlanEditStates.trial)
+async def save_plan_trial(
+    message: Message, admin_service: AdminService, catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    data = await state.get_data()
+    try:
+        if message.text.strip().casefold() in {"вимкнути", "off"}:
+            price, months = None, 1
+        else:
+            amount, period = message.text.replace(",", ".").split()
+            price, months = Decimal(amount), int(period)
+        plan = await catalog_service.configure_trial(
+            uuid.UUID(str(data["selected_plan_id"])), price=price, months=months,
+        )
+    except (ValueError, InvalidOperation):
+        await message.answer("Некоректні дані. Приклад: 10 1. Ціна має бути меншою за звичайну.")
+        return
+    await state.clear()
+    if plan is None:
+        await message.answer("Тариф недоступний.")
+        return
+    await message.answer(
+        "✅ Налаштування тріалу збережено. Чинні підписки не змінено.",
+        reply_markup=plan_actions_keyboard(
+            plan, can_archive=plan.code != catalog_service.default_plan_code,
+        ),
+    )
 
 
 @admin_router.callback_query(F.data.startswith("adm:plan_name:"))

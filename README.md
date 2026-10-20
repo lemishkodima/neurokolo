@@ -255,6 +255,32 @@ created with different codes and linked to any desired resource set.
 
 ## Website checkout integration
 
+### Discounted first period and public links
+
+In Telegram, open `/admin` → tariffs → select a tariff → `🎁 Тріал`.
+Send `10 1` to charge 10 in the tariff currency for the first month. The tariff's
+normal price and billing period apply afterwards (for example, 990 UAH every month).
+Supported initial periods are 1, 2, 3, 6 and 12 months. The first amount must be positive,
+have at most two decimal places and be lower than the normal price; zero/free trials
+are not implemented. Send `вимкнути` to disable the offer for new checkouts.
+Existing checkout and subscription terms do not change when the tariff is edited.
+
+Use `🔗 Оплата з сайту` in the same tariff menu to copy its public
+`/checkout?plan_code=...` URL. Publish this URL, not a customer's personal claim link.
+Each visit creates a separate checkout. After signed payment confirmation, the return
+page offers a personal Telegram `start=claim_...` link. The customer opens it and presses
+Start; the bot binds the paid checkout to that Telegram account and issues access without
+another payment. A pending callback never grants access. If confirmation arrives after
+the account is bound, activation happens automatically. Paid links remain claimable after
+the unpaid-checkout expiry; validated renewals received before claim are applied once.
+
+The claim URL is a bearer credential: the first Telegram account to claim it becomes its
+owner. Keep it private; another account cannot claim it afterwards. A known Telegram
+account with a previous paid trial receives the normal price on new bot checkouts.
+Anonymous checkout cannot enforce one trial per person before payment because the Telegram
+account is not yet known. This is not a card-level anti-abuse mechanism. Ensure the global
+WayForPay test window is disabled before publishing a production link.
+
 For the built-in public checkout, direct the club button to:
 
 ```text

@@ -345,6 +345,7 @@ async def _offer_checkout(
         settings.internal_api_key.get_secret_value(),
     )
     checkout_options: list[tuple[str, str]] = []
+    trial_descriptions: list[str] = []
     for plan in plans:
         checkout_url = add_query_parameter(
             settings.membership_site_url,
@@ -356,10 +357,22 @@ async def _offer_checkout(
             f"{plan.name} · {plan.price} {plan.currency} / "
             f"{billing_period_label(plan.billing_months)}"
         )
+        if plan.trial_price is not None and plan.trial_price < plan.price:
+            trial_descriptions.append(
+                f"🎁 {escape(plan.name)}: перші {plan.trial_months} міс. — "
+                f"{plan.trial_price} {plan.currency}; далі {plan.price} {plan.currency} "
+                f"кожні {plan.billing_months} міс."
+            )
         if len(label) > 64:
             label = f"{label[:63]}…"
         checkout_options.append((label, checkout_url))
 
+    if trial_descriptions:
+        await message.answer(
+            "\n".join(trial_descriptions)
+            + "\nПільга доступна, якщо цей Telegram-акаунт ще не використав тріал. "
+            "Перевірте остаточні умови на сторінці оплати.",
+        )
     if len(checkout_options) == 1:
         await message.answer(
             "Оформіть підписку на клуб. Після підтвердження WayForPay бот автоматично "

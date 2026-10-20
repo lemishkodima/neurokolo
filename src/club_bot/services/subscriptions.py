@@ -157,6 +157,18 @@ class SubscriptionService:
                 user = await UserRepository(session).by_telegram_id(telegram_id)
                 if user is None:
                     raise CheckoutOwnerNotFoundError(telegram_id)
+            use_trial = plan.trial_price is not None and plan.trial_price < plan.price
+            if use_trial and user is not None:
+                used = await session.scalar(select(CheckoutSession.id).where(
+                    CheckoutSession.user_id == user.id,
+                    CheckoutSession.recurring_amount.is_not(None),
+                    CheckoutSession.amount < CheckoutSession.recurring_amount,
+                    CheckoutSession.status.in_([CheckoutStatus.PAID, CheckoutStatus.CLAIMED]),
+                ).limit(1))
+                use_trial = used is None
+            first_amount = plan.trial_price if use_trial else plan.price
+            assert first_amount is not None
+            initial_months = plan.trial_months if use_trial else plan.billing_months
             token = generate_public_token()
             prefix = "TEST" if test_mode else "CLUB"
             order_reference = f"{prefix}-{now:%Y%m%d}-{token[:12]}"
@@ -168,7 +180,9 @@ class SubscriptionService:
                 referrer_code=referral_code,
                 email=email,
                 phone=phone,
-                amount=plan.price,
+                amount=first_amount,
+                recurring_amount=plan.price,
+                initial_months=initial_months,
                 currency=plan.currency,
                 billing_months=plan.billing_months,
                 expires_at=now + timedelta(hours=24),
@@ -177,7 +191,7 @@ class SubscriptionService:
             if user is not None:
                 await self._attach_referrer_from_checkout(session, user, referral_code)
 
-            next_payment_at = add_billing_months(now, plan.billing_months)
+            next_payment_at = add_billing_months(now, initial_months)
             period_label = (
                 f"{plan.billing_months} місяць"
                 if plan.billing_months == 1
@@ -186,9 +200,14 @@ class SubscriptionService:
             fields = provider.build_purchase_payload(
                 order_reference=order_reference,
                 order_date=int(now.timestamp()),
-                amount=plan.price,
+                amount=first_amount,
+                regular_amount=plan.price,
                 currency=plan.currency,
                 product_name=(
+                    f"{'[TEST] ' if test_mode else ''}{plan.name} — "
+                    f"перші {initial_months} міс.: {first_amount} {plan.currency}; "
+                    f"далі {plan.price} {plan.currency} кожні {plan.billing_months} міс."
+                    if use_trial else
                     f"[TEST] {plan.name} — підписка на {period_label}, автопродовження"
                     if test_mode
                     else f"{plan.name} — підписка на {period_label}, автопродовження"
@@ -234,6 +253,7 @@ class SubscriptionService:
                 select(Payment.provider_payload)
                 .where(
                     Payment.checkout_session_id == checkout.id,
+                    Payment.order_reference == checkout.order_reference,
                     Payment.status == PaymentStatus.APPROVED,
                     Payment.failure_reason.is_(None),
                 )
@@ -245,6 +265,21 @@ class SubscriptionService:
                 checkout,
                 repay_url=self._repay_url_from_payload(approved_payload or {}),
             )
+            deferred = list((await session.scalars(select(Payment).where(
+                Payment.checkout_session_id == checkout.id,
+                Payment.subscription_id.is_(None),
+                Payment.order_reference != checkout.order_reference,
+            ).order_by(Payment.created_at, Payment.id).with_for_update())).all())
+            for payment in deferred:
+                if payment.status == PaymentStatus.APPROVED and payment.failure_reason is None:
+                    self._extend_subscription(subscription, effective_at=payment.created_at)
+                    payment.subscription_id = subscription.id
+                elif payment.status == PaymentStatus.DECLINED:
+                    self._apply_failed_payment(
+                        subscription, failure_reason=payment.failure_reason,
+                        failed_at=as_utc(payment.created_at), payload=payment.provider_payload,
+                    )
+                    payment.subscription_id = subscription.id
             await session.execute(
                 update(Payment)
                 .where(
@@ -255,7 +290,10 @@ class SubscriptionService:
                 )
                 .values(subscription_id=subscription.id)
             )
-            return ClaimResult(paid=True, subscription=subscription)
+            result = ClaimResult(paid=True, subscription=subscription)
+            order_reference = checkout.order_reference
+        await self.verify_recurring_for_order(order_reference)
+        return result
 
     async def process_callback(self, payload: dict[str, Any]) -> bool:
         """Persist a callback. Returns False when it is a duplicate delivery."""
@@ -276,13 +314,28 @@ class SubscriptionService:
             subscription = await SubscriptionRepository(session).by_provider_identifiers(
                 order_reference, rec_token
             )
+            deferred_checkout = None
+            if checkout is None and subscription is None:
+                canonical = canonical_wayforpay_order_reference(order_reference)
+                if canonical != order_reference:
+                    deferred_checkout = await CheckoutRepository(session).by_order_reference(
+                        canonical, for_update=True,
+                    )
+                    if deferred_checkout is not None:
+                        # Claim may have committed while we waited for its checkout lock.
+                        subscription = await SubscriptionRepository(
+                            session
+                        ).by_provider_identifiers(order_reference, rec_token)
+                        if subscription is not None:
+                            deferred_checkout = None
             provider_status = str(payload["transactionStatus"])
             approved = provider_status.casefold() == "approved"
             callback_amount = Decimal(str(payload["amount"])).quantize(Decimal("0.01"))
             callback_currency = str(payload["currency"]).upper()
             payment = Payment(
                 subscription_id=subscription.id if subscription else None,
-                checkout_session_id=checkout.id if checkout else None,
+                checkout_session_id=(checkout.id if checkout else
+                                     deferred_checkout.id if deferred_checkout else None),
                 provider_event_id=event_id,
                 order_reference=order_reference,
                 amount=callback_amount,
@@ -316,6 +369,11 @@ class SubscriptionService:
             elif subscription is not None:
                 expected_amount = subscription.billing_amount
                 expected_currency = subscription.billing_currency
+            elif deferred_checkout is not None:
+                expected_amount = (deferred_checkout.recurring_amount
+                                   if deferred_checkout.recurring_amount is not None
+                                   else deferred_checkout.amount)
+                expected_currency = deferred_checkout.currency
             if (
                 expected_amount is not None
                 and expected_currency is not None
@@ -327,6 +385,19 @@ class SubscriptionService:
                 payment.failure_reason = "Payment amount or currency mismatch"
                 return True
 
+            if deferred_checkout is not None:
+                # Keep validated renewal payments until the purchaser claims the checkout.
+                return True
+            if checkout is not None and checkout.status == CheckoutStatus.PAID:
+                # Re-delivery of the initial approval must not shift the paid-through date.
+                return False
+            if (
+                checkout is not None and checkout.status == CheckoutStatus.CLAIMED
+                and checkout.recurring_amount is not None
+                and checkout.recurring_amount != checkout.amount
+            ):
+                # Trial renewals use the provider's _WFPREG reference, not the initial invoice.
+                return False
             if checkout is not None and checkout.status != CheckoutStatus.CLAIMED:
                 checkout.status = CheckoutStatus.PAID
                 checkout.paid_at = utc_now()
@@ -761,6 +832,13 @@ class SubscriptionService:
             )
             return int(telegram_id) if telegram_id is not None else None
 
+    async def checkout_status_by_token(self, token: str) -> CheckoutStatus:
+        async with self.session_factory() as session:
+            checkout = await CheckoutRepository(session).by_token(token)
+            if checkout is None:
+                raise CheckoutNotFoundError(token)
+            return checkout.status
+
     async def checkout_owner_telegram_id_by_token(self, token: str) -> int | None:
         async with self.session_factory() as session:
             telegram_id = await session.scalar(
@@ -974,8 +1052,11 @@ class SubscriptionService:
             plan_id=checkout.plan_id,
             status=SubscriptionStatus.ACTIVE,
             current_period_start=now,
-            current_period_end=add_billing_months(now, checkout.billing_months),
-            billing_amount=checkout.amount,
+            current_period_end=add_billing_months(
+                now, checkout.initial_months or checkout.billing_months,
+            ),
+            billing_amount=(checkout.recurring_amount
+                            if checkout.recurring_amount is not None else checkout.amount),
             billing_currency=checkout.currency,
             billing_months=checkout.billing_months,
             provider=(

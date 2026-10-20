@@ -354,6 +354,26 @@ class CatalogService:
             await session.flush()
             return plan
 
+    async def configure_trial(
+        self, plan_id: uuid.UUID, *, price: Decimal | None, months: int = 1,
+    ) -> Plan | None:
+        validate_billing_months(months)
+        if price is not None and (
+            not price.is_finite() or price <= 0 or price >= Decimal("10000000000")
+            or price != price.quantize(Decimal("0.01"))
+        ):
+            raise ValueError("Вкажіть додатну суму з максимум двома знаками після коми.")
+        async with self.session_factory() as session, session.begin():
+            plan = await session.get(Plan, plan_id, with_for_update=True)
+            if plan is None or not plan.is_active:
+                return None
+            if price is not None and price >= plan.price:
+                raise ValueError("Тріальна ціна має бути меншою за звичайну.")
+            plan.trial_price = price
+            plan.trial_months = months
+            await session.flush()
+            return plan
+
     async def archive_plan(self, plan_id: uuid.UUID) -> bool:
         async with self.session_factory() as session, session.begin():
             plan = await session.get(Plan, plan_id, with_for_update=True)

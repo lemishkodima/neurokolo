@@ -32,7 +32,7 @@ from sqlalchemy import func, or_, select, text
 from club_bot.bot.setup import configure_bot
 from club_bot.config import Settings, get_settings
 from club_bot.container import Container, build_container
-from club_bot.domain.enums import PaymentStatus, RecurringStatus, SubscriptionStatus
+from club_bot.domain.enums import CheckoutStatus, PaymentStatus, RecurringStatus, SubscriptionStatus
 from club_bot.integrations.wayforpay import InvalidWayForPaySignature
 from club_bot.models import Payment, Subscription
 from club_bot.schemas import CheckoutCreate, CheckoutResponse
@@ -43,6 +43,7 @@ from club_bot.services.checkout_links import (
 from club_bot.services.landing_templates import LandingTemplateService
 from club_bot.services.subscriptions import (
     ApprovedCallbackContext,
+    CheckoutNotFoundError,
     CheckoutOwnerNotFoundError,
     PlanNotFoundError,
 )
@@ -490,6 +491,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gateway_fields = dict(checkout.gateway_fields)
         gateway_fields["returnUrl"] = complete_url
         amount = escape(str(gateway_fields.get("amount", "")))
+        regular_amount = escape(str(gateway_fields.get("regularAmount", amount)))
         currency = escape(str(gateway_fields.get("currency", "")))
         gateway_url = escape(checkout.gateway_url, quote=True)
         gateway_parts = urlsplit(checkout.gateway_url)
@@ -513,7 +515,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         regular_count = escape(str(gateway_fields.get("regularCount", "—")))
         subscription_notice = (
             "<p><b>Регулярна підписка:</b> "
-            f"{escape(regular_mode_label)}, {amount} {currency}. "
+            f"Перший платіж: {amount} {currency}; далі "
+            f"{escape(regular_mode_label)}, {regular_amount} {currency}. "
             f"Наступне списання: <b>{next_payment}</b>. "
             f"Кількість платежів за правилом: <b>{regular_count}</b>. "
             "Автопродовження можна вимкнути в Telegram-боті.</p>"
@@ -572,6 +575,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token: str = Query(min_length=20, max_length=200, pattern=r"^[A-Za-z0-9_-]+$"),
         container: Container = Depends(container_from_request),
     ) -> HTMLResponse:
+        try:
+            payment_status = await container.subscription_service.checkout_status_by_token(token)
+        except CheckoutNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Checkout not found") from error
         telegram_id = (
             await container.subscription_service.checkout_owner_telegram_id_by_token(token)
         )
@@ -586,9 +593,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             button = "Відкрити бота"
             destination_url = bot_url
         else:
-            title = "Завершіть активацію"
-            message = "Поверніться до Telegram-бота, щоб прив’язати оплату та отримати доступ."
-            button = "Повернутися до бота"
+            paid = payment_status in (CheckoutStatus.PAID, CheckoutStatus.CLAIMED)
+            title = "Оплату підтверджено" if paid else "Очікуємо підтвердження оплати"
+            message = (
+                "Перейдіть у Telegram та натисніть Start / Розпочати. Оплачена підписка "
+                "прив’яжеться до вашого акаунта — повторно платити не потрібно. "
+                "Не передавайте це персональне посилання іншим людям."
+                if paid else
+                "Підтвердження WayForPay ще не отримано. Можете перейти в бот і натиснути "
+                "Start / Розпочати: після підтвердження оплати доступ активується автоматично."
+            )
+            button = "Активувати підписку в Telegram" if paid else "Перейти в Telegram"
             destination_url = f"{bot_url}?start=claim_{quote(token, safe='')}"
         escaped_destination_url = escape(destination_url, quote=True)
         body = f"""<!doctype html>

@@ -93,6 +93,8 @@ class Plan(TimestampMixin, Base):
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(3), default="UAH")
     billing_months: Mapped[int] = mapped_column(Integer, default=1)
+    trial_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    trial_months: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -191,6 +193,8 @@ class CheckoutSession(TimestampMixin, Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(3))
     billing_months: Mapped[int] = mapped_column(Integer, default=1)
+    recurring_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    initial_months: Mapped[int | None] = mapped_column(Integer)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
