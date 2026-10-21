@@ -490,7 +490,8 @@ async def test_join_with_subscription_sends_configured_content_and_invite() -> N
             self.chat = SimpleNamespace(id=501)
 
         async def answer(self, _text: str, **_kwargs: object) -> None:
-            pytest.fail("Configured paid content must be copied instead of a fallback answer")
+            assert "Як увійти до клубу" in _text
+            assert "до списку чатів Telegram" in _text
 
     bot = FakeBot()
     await join(

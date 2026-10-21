@@ -15,6 +15,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from club_bot.bot.access_text import JOIN_INSTRUCTIONS
 from club_bot.domain.enums import PaymentStatus, SubscriptionStatus
 from club_bot.domain.payments import canonical_wayforpay_order_reference
 from club_bot.domain.rules import as_utc, utc_now
@@ -93,10 +94,7 @@ class SubscriptionNotificationService:
             )
         text = await self.settings_service.get("payment_success_text")
         if invites:
-            text += (
-                "\n\nНатисніть кнопку нижче та подайте заявку. Бот автоматично "
-                "підтвердить лише ваш Telegram-акаунт; посилання персональне."
-            )
+            text += "\n\n" + JOIN_INSTRUCTIONS
         else:
             text += (
                 "\n\nНе вдалося підготувати посилання входу. Зверніться до техпідтримки. "

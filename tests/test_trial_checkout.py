@@ -129,6 +129,16 @@ async def test_trial_initial_and_regular_amounts_are_snapshotted(
         await service.claim_checkout(checkout.checkout_token, 502)
     canceled = await service.cancel_for_telegram_user(501)
     assert as_utc(canceled.current_period_end) == as_utc(view.current_period_end)
+    next_checkout = await service.create_checkout(
+        plan_code="trial",
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+        telegram_id=501,
+    )
+    assert next_checkout.gateway_fields["amount"] == "1500.00"
+    assert next_checkout.gateway_fields["regularAmount"] == "1500.00"
 
 
 async def test_anonymous_renewal_before_claim_is_applied_once(database: Any, services: Any) -> None:

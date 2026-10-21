@@ -9,6 +9,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.types import CallbackQuery, Message
 
+from club_bot.bot.access_text import JOIN_INSTRUCTIONS
 from club_bot.bot.keyboards import (
     cancel_confirmation,
     checkout_plan_buttons,
@@ -135,10 +136,11 @@ async def join(
         if invites:
             if not configured:
                 await message.answer(
-                    "Ваш доступ активний. Натисніть кнопку нижче та подайте заявку — "
-                    "бот автоматично підтвердить лише ваш Telegram-акаунт.",
+                    "Ваш доступ активний.\n\n" + JOIN_INSTRUCTIONS,
                     reply_markup=resource_links([(invite.name, invite.url) for invite in invites]),
                 )
+            else:
+                await message.answer(JOIN_INSTRUCTIONS)
         else:
             await message.answer("Підписка активна, але для тарифу ще не додано каналів.")
         return

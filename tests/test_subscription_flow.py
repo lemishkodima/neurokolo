@@ -649,6 +649,9 @@ async def test_activation_notification_contains_personal_invite_button() -> None
     chat_id, text, markup = bot.messages[0]
     assert chat_id == 123
     assert "Власний текст успішної оплати" in text
+    assert "Подати заявку" in text
+    assert "до списку чатів Telegram" in text
+    assert "старе посилання відкликається" in text
     assert markup.inline_keyboard[0][0].text == "Доєднатися 💎"  # type: ignore[union-attr]
     assert markup.inline_keyboard[0][0].url == "https://t.me/+personal"  # type: ignore[union-attr]
 

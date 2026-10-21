@@ -34,6 +34,7 @@ async def track_member_moderation(
 async def review_join_request(
     event: ChatJoinRequest,
     access_service: AccessService,
+    bot: Bot,
 ) -> None:
     approved = await access_service.handle_join_request(
         chat_id=event.chat.id,
@@ -46,6 +47,18 @@ async def review_join_request(
         event.from_user.id,
         event.chat.id,
     )
+    if approved:
+        title = escape(event.chat.title or "Клуб")
+        try:
+            await bot.send_message(
+                event.from_user.id,
+                f"✅ Вступ підтверджено! Ви вже учасник «{title}».\n\n"
+                "Поверніться до списку чатів Telegram і відкрийте цей канал або групу. "
+                "Якщо не бачите — введіть назву в пошуку Telegram.\n\n"
+                "Повторно натискати старе запрошення не потрібно: воно одноразове.",
+            )
+        except TelegramAPIError:
+            logger.warning("Could not notify user %s about approved join", event.from_user.id)
 
 
 @system_router.my_chat_member()

@@ -208,7 +208,7 @@ async def test_system_router_forwards_join_request_identity_and_link() -> None:
 
     access = FakeAccessService()
     event = SimpleNamespace(
-        chat=SimpleNamespace(id=-100123),
+        chat=SimpleNamespace(id=-100123, title="Клуб"),
         from_user=SimpleNamespace(id=123),
         invite_link=SimpleNamespace(invite_link="https://t.me/+personal"),
     )
@@ -216,6 +216,7 @@ async def test_system_router_forwards_join_request_identity_and_link() -> None:
     await review_join_request(
         event,  # type: ignore[arg-type]
         access,  # type: ignore[arg-type]
+        SimpleNamespace(send_message=AsyncMock()),  # type: ignore[arg-type]
     )
 
     assert access.request == {
