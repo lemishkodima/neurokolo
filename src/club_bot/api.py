@@ -15,6 +15,7 @@ from aiogram import Bot
 from aiogram.types import Update
 from fastapi import (
     BackgroundTasks,
+    Body,
     Depends,
     FastAPI,
     Header,
@@ -41,6 +42,7 @@ from club_bot.services.checkout_links import (
     verify_personal_checkout_token,
 )
 from club_bot.services.landing_templates import LandingTemplateService
+from club_bot.services.meta_pixel import CONSENT_HTML, PARENT_SCRIPT, pixel_frame
 from club_bot.services.subscriptions import (
     ApprovedCallbackContext,
     CheckoutNotFoundError,
@@ -565,6 +567,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers=_checkout_response_headers(form_action, script_nonce),
         )
 
+    @app.get("/tracking/meta", include_in_schema=False)
+    async def meta_frame() -> HTMLResponse:
+        nonce = secrets.token_urlsafe(24)
+        return HTMLResponse(pixel_frame(nonce), headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'none'; sandbox allow-scripts; "
+                f"script-src 'nonce-{nonce}' https://connect.facebook.net; "
+                "img-src https://www.facebook.com; connect-src https://www.facebook.com; "
+                "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+            ),
+        })
+
+    @app.post("/checkout/meta-purchase", include_in_schema=False)
+    async def meta_purchase(
+        response: Response,
+        token: str = Body(embed=True, min_length=20, max_length=200,
+                          pattern=r"^[A-Za-z0-9_-]+$"),
+        container: Container = Depends(container_from_request),
+    ) -> dict[str, Any] | None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await container.subscription_service.claim_meta_purchase(token)
+        except CheckoutNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Checkout not found") from error
+
     @app.api_route(
         "/checkout/complete",
         methods=["GET", "POST"],
@@ -606,6 +636,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             button = "Активувати підписку в Telegram" if paid else "Перейти в Telegram"
             destination_url = f"{bot_url}?start=claim_{quote(token, safe='')}"
         escaped_destination_url = escape(destination_url, quote=True)
+        nonce = secrets.token_urlsafe(24)
         body = f"""<!doctype html>
 <html lang="uk">
 <head>
@@ -629,12 +660,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <h1>{title}</h1>
     <p>{message}</p>
     <a href="{escaped_destination_url}">{button}</a>
+    {CONSENT_HTML}
   </main>
+  <script nonce="{nonce}">{PARENT_SCRIPT}</script>
 </body>
 </html>"""
-        return HTMLResponse(
-            content=body,
-            headers=_checkout_response_headers(),
-        )
+        headers = _checkout_response_headers(script_nonce=nonce)
+        headers["Content-Security-Policy"] += "; frame-src 'self'; connect-src 'self'"
+        return HTMLResponse(content=body, headers=headers)
 
     return app

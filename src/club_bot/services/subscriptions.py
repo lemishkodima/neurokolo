@@ -26,7 +26,7 @@ from club_bot.domain.payments import (
 )
 from club_bot.domain.rules import as_utc, generate_public_token, utc_now
 from club_bot.integrations.wayforpay import WayForPayClient
-from club_bot.models import CheckoutSession, Payment, Referral, Subscription, User
+from club_bot.models import AppSetting, CheckoutSession, Payment, Referral, Subscription, User
 from club_bot.repositories import (
     CheckoutRepository,
     PlanRepository,
@@ -838,6 +838,36 @@ class SubscriptionService:
             if checkout is None:
                 raise CheckoutNotFoundError(token)
             return checkout.status
+
+    async def claim_meta_purchase(self, token: str) -> dict[str, Any] | None:
+        """Reserve one browser emission, not a guarantee of delivery to Meta."""
+        async with self.session_factory() as session, session.begin():
+            checkout = await CheckoutRepository(session).by_token(token, for_update=True)
+            if checkout is None:
+                raise CheckoutNotFoundError(token)
+            if checkout.order_reference.startswith("TEST-"):
+                return None
+            if checkout.status not in (CheckoutStatus.PAID, CheckoutStatus.CLAIMED):
+                return None
+            payment = await session.scalar(select(Payment).where(
+                Payment.checkout_session_id == checkout.id,
+                Payment.order_reference == checkout.order_reference,
+                Payment.status == PaymentStatus.APPROVED,
+                Payment.failure_reason.is_(None),
+                Payment.amount == checkout.amount,
+                Payment.currency == checkout.currency,
+            ).order_by(Payment.created_at).limit(1))
+            if payment is None:
+                return None
+            key = f"meta_purchase:{checkout.id}"
+            if await session.get(AppSetting, key) is not None:
+                return None
+            session.add(AppSetting(key=key, value=utc_now().isoformat()))
+            return {
+                "event_id": f"purchase_{checkout.id}",
+                "value": float(payment.amount),
+                "currency": payment.currency,
+            }
 
     async def checkout_owner_telegram_id_by_token(self, token: str) -> int | None:
         async with self.session_factory() as session:

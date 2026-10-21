@@ -239,13 +239,54 @@ async def test_external_checkout_completion_uses_real_paid_state(
             token, reference = row.public_token, row.order_reference
         pending = await c.get("/checkout/complete", params={"token": token})
         assert "Очікуємо підтвердження" in pending.text
+        assert (await c.post("/checkout/meta-purchase", json={"token": token})).json() is None
         await service.process_callback(callback(services[2], reference, "10.00"))
         paid = await c.post("/checkout/complete", params={"token": token})
         assert "Оплату підтверджено" in paid.text
         assert f"start=claim_{token}" in paid.text
+        assert "connect.facebook.net" not in paid.text
+        assert "allow-same-origin" not in paid.text
+        assert "analytics-yes" in paid.text and "analytics-no" in paid.text
+        assert paid.headers["referrer-policy"] == "no-referrer"
+        purchase = await c.post("/checkout/meta-purchase", json={"token": token})
+        event = purchase.json()
+        assert event["value"] == 10.0  # First payment, not the 990 recurring amount.
+        assert event["currency"] == "UAH"
+        assert set(event) == {"event_id", "value", "currency"}
+        assert token not in purchase.text and reference not in purchase.text
+        assert purchase.headers["cache-control"] == "no-store"
+        assert (await c.post("/checkout/meta-purchase", json={"token": token})).json() is None
+        frame = await c.get("/tracking/meta")
+        assert "3714470908697594" in frame.text
+        assert "sandbox allow-scripts" in frame.headers["content-security-policy"]
+        assert "allow-same-origin" not in frame.headers["content-security-policy"]
+        assert token not in frame.text
         assert (await c.get("/checkout/complete", params={"token": "x" * 32})).status_code == 404
         async with database[1]() as session:
             assert await session.scalar(select(Subscription)) is None
+
+
+async def test_meta_ignores_test_checkout_and_unverified_paid_state(
+    database: Any,
+    services: Any,
+) -> None:
+    service = await prepare(database, services)
+    checkout = await service.create_checkout(
+        plan_code="trial",
+        email=None,
+        phone=None,
+        referral_code=None,
+        return_url=None,
+    )
+    async with database[1]() as session, session.begin():
+        row = await session.scalar(select(CheckoutSession))
+        row.status = CheckoutStatus.PAID
+    assert await service.claim_meta_purchase(checkout.checkout_token) is None
+    await service.process_callback(callback(services[2], checkout.order_reference, "10.00"))
+    async with database[1]() as session, session.begin():
+        row = await session.scalar(select(CheckoutSession))
+        row.order_reference = "TEST-example"
+    assert await service.claim_meta_purchase(checkout.checkout_token) is None
 
 
 async def test_admin_trial_validation_disable_and_archive(database: Any, services: Any) -> None:

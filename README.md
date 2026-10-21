@@ -255,6 +255,25 @@ created with different codes and linked to any desired resource set.
 
 ## Website checkout integration
 
+### Meta Pixel on completion
+
+Pixel `3714470908697594` loads only after the visitor explicitly allows advertising
+analytics on `/checkout/complete`. Declining does not affect activation. The pixel
+runs in a sandboxed opaque-origin iframe at `/tracking/meta`, with no referrer and
+no access to the parent DOM (which contains the private Telegram claim link).
+It therefore reports a clean analytics URL, not the token-bearing completion URL.
+No advanced matching or automatic configuration is enabled. This isolation limits
+cookie-based attribution; this is not Conversions API or guaranteed ad attribution.
+
+After consent and pixel script load, the page polls for at most two minutes for the
+signed initial payment. Purchase uses that payment's amount/currency, not the normal
+recurring amount. TEST orders are excluded. A checkout row lock plus an app_settings
+`meta_purchase:<checkout UUID>` reservation permits at most one browser emission per
+checkout across refreshes/devices. The opaque event ID is stable; no Telegram ID,
+email, claim token, or provider reference is sent in the event. A reservation is not
+a delivery receipt: blockers, browser closure or network failure can lose an event.
+No replay of historical purchases and no server-side CAPI delivery is performed.
+
 ### Discounted first period and public links
 
 In Telegram, open `/admin` → tariffs → select a tariff → `🎁 Тріал`.
