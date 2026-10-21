@@ -42,7 +42,7 @@ from club_bot.services.checkout_links import (
     verify_personal_checkout_token,
 )
 from club_bot.services.landing_templates import LandingTemplateService
-from club_bot.services.meta_pixel import CONSENT_HTML, PARENT_SCRIPT, pixel_frame
+from club_bot.services.meta_pixel import PARENT_SCRIPT, pixel_frame
 from club_bot.services.subscriptions import (
     ApprovedCallbackContext,
     CheckoutNotFoundError,
@@ -660,7 +660,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     <h1>{title}</h1>
     <p>{message}</p>
     <a href="{escaped_destination_url}">{button}</a>
-    {CONSENT_HTML}
   </main>
   <script nonce="{nonce}">{PARENT_SCRIPT}</script>
 </body>

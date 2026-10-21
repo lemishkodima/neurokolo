@@ -2,15 +2,6 @@
 
 PIXEL_ID = "3714470908697594"
 
-CONSENT_HTML = """
-<section id="analytics-consent">
-  <p>Дозволити рекламну аналітику Meta? Meta отримає дані відвідування та,
-  після підтвердження, суму й валюту покупки. Це не впливає на доступ до клубу.</p>
-  <button id="analytics-yes" type="button">Дозволити</button>
-  <button id="analytics-no" type="button">Відхилити</button>
-</section>
-"""
-
 PARENT_SCRIPT = """
 (() => {
   const token = new URL(location.href).searchParams.get('token');
@@ -39,18 +30,12 @@ PARENT_SCRIPT = """
       purchase();
     }
   });
-  document.getElementById('analytics-no').onclick = () => {
-    document.getElementById('analytics-consent').remove();
-  };
-  document.getElementById('analytics-yes').onclick = () => {
-    document.getElementById('analytics-consent').remove();
-    frame = document.createElement('iframe');
-    frame.setAttribute('sandbox', 'allow-scripts');
-    frame.referrerPolicy = 'no-referrer';
-    frame.hidden = true;
-    frame.src = '/tracking/meta';
-    document.body.appendChild(frame);
-  };
+  frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.referrerPolicy = 'no-referrer';
+  frame.hidden = true;
+  frame.src = '/tracking/meta';
+  document.body.appendChild(frame);
 })();
 """
 

@@ -246,7 +246,9 @@ async def test_external_checkout_completion_uses_real_paid_state(
         assert f"start=claim_{token}" in paid.text
         assert "connect.facebook.net" not in paid.text
         assert "allow-same-origin" not in paid.text
-        assert "analytics-yes" in paid.text and "analytics-no" in paid.text
+        assert "analytics-yes" not in paid.text and "analytics-no" not in paid.text
+        assert "analytics-consent" not in paid.text
+        assert "document.body.appendChild(frame)" in paid.text
         assert paid.headers["referrer-policy"] == "no-referrer"
         purchase = await c.post("/checkout/meta-purchase", json={"token": token})
         event = purchase.json()
