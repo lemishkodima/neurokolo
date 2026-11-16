@@ -26,6 +26,7 @@ from club_bot.bot.admin_router import (
     save_plan_trial,
     save_trial_quantity,
     select_trial_unit,
+    trial_back,
 )
 from club_bot.bot.admin_states import PlanEditStates
 from club_bot.config import Settings
@@ -420,6 +421,27 @@ async def test_admin_trial_and_external_link_controls(
         admin.is_admin.return_value = True
         await select_trial_unit(unit_event, admin, state)
         assert await state.get_state() == PlanEditStates.trial_quantity.state
+        back = event.model_copy(update={"data": f"adm:trial_back:{nonce}:unit"})
+        admin.is_admin.return_value = False
+        await trial_back(back, admin, catalog, state)
+        assert await state.get_state() == PlanEditStates.trial_quantity.state
+        admin.is_admin.return_value = True
+        await trial_back(back, admin, catalog, state)
+        assert await state.get_state() == PlanEditStates.trial_unit.state
+        assert (await state.get_data())["trial_price"] == "5"
+        await select_trial_unit(unit_event, admin, state)
+        assert await state.get_state() == PlanEditStates.trial_unit.state
+        nonce = (await state.get_data())["trial_nonce"]
+        await trial_back(
+            event.model_copy(update={"data": f"adm:trial_back:{nonce}:price"}),
+            admin, catalog, state,
+        )
+        assert await state.get_state() == PlanEditStates.trial.state
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        await save_plan_trial(message.model_copy(update={"text": "5"}), admin, catalog, state)
+        nonce = (await state.get_data())["trial_nonce"]
+        unit_event = event.model_copy(update={"data": f"adm:trial_unit:{nonce}:{unit}"})
+        await select_trial_unit(unit_event, admin, state)
         await save_trial_quantity(message.model_copy(update={"text": "0"}), admin, catalog, state)
         assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
         await save_trial_quantity(
@@ -429,6 +451,12 @@ async def test_admin_trial_and_external_link_controls(
         await select_trial_unit(unit_event, admin, state)
         assert await state.get_state() is None
         assert (await catalog.get_plan(plan.id)).trial_price == Decimal("5")
+        await state.update_data(selected_plan_id=str(plan.id), trial_nonce="exit")
+        await state.set_state(PlanEditStates.trial)
+        await trial_back(
+            event.model_copy(update={"data": "adm:trial_back:exit:plan"}), admin, catalog, state,
+        )
+        assert await state.get_state() is None
         assert (await catalog.get_plan(plan.id)).trial_duration == count
         assert (await catalog.get_plan(plan.id)).trial_unit == unit
         await state.update_data(selected_plan_id=str(plan.id))

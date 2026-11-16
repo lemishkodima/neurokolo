@@ -47,6 +47,14 @@ def trial_units_keyboard(nonce: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label, callback_data=f"adm:trial_unit:{nonce}:{unit}")
          for label, unit in (("Дні", "days"), ("Тижні", "weeks"), ("Місяці", "months"))],
+        [InlineKeyboardButton(text="← Назад", callback_data=f"adm:trial_back:{nonce}:price")],
+        [InlineKeyboardButton(text="Скасувати", callback_data="adm:home")],
+    ])
+
+
+def trial_back_keyboard(nonce: str, target: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад", callback_data=f"adm:trial_back:{nonce}:{target}")],
         [InlineKeyboardButton(text="Скасувати", callback_data="adm:home")],
     ])
 
