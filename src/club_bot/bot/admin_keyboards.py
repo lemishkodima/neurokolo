@@ -59,6 +59,14 @@ def trial_back_keyboard(nonce: str, target: str) -> InlineKeyboardMarkup:
     ])
 
 
+def trial_confirm_keyboard(nonce: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Підтвердити", callback_data=f"adm:trial_confirm:{nonce}")],
+        [InlineKeyboardButton(text="← Назад", callback_data=f"adm:trial_back:{nonce}:quantity")],
+        [InlineKeyboardButton(text="Скасувати", callback_data="adm:home")],
+    ])
+
+
 def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     rows = [
         [

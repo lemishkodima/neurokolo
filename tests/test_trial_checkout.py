@@ -22,6 +22,7 @@ from club_bot.api import create_app
 from club_bot.bot.admin_keyboards import plan_actions_keyboard
 from club_bot.bot.admin_router import (
     admin_home,
+    confirm_plan_trial,
     payment_plan_link,
     save_plan_trial,
     save_trial_quantity,
@@ -447,6 +448,39 @@ async def test_admin_trial_and_external_link_controls(
         await save_trial_quantity(
             message.model_copy(update={"text": str(count)}), admin, catalog, state,
         )
+        assert await state.get_state() == PlanEditStates.trial_confirm.state
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        summary = answer.call_args.args[0]
+        assert "990" in summary and "UAH" in summary and "3 місяці" in summary
+        nonce = (await state.get_data())["trial_nonce"]
+        confirmation = event.model_copy(update={"data": f"adm:trial_confirm:{nonce}"})
+        admin.is_admin.return_value = False
+        await confirm_plan_trial(confirmation, admin, catalog, state)
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        admin.is_admin.return_value = True
+        await trial_back(
+            event.model_copy(update={"data": f"adm:trial_back:{nonce}:quantity"}),
+            admin, catalog, state,
+        )
+        assert await state.get_state() == PlanEditStates.trial_quantity.state
+        await confirm_plan_trial(confirmation, admin, catalog, state)
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        await save_trial_quantity(
+            message.model_copy(update={"text": str(count)}), admin, catalog, state,
+        )
+        nonce = (await state.get_data())["trial_nonce"]
+        confirmation = event.model_copy(update={"data": f"adm:trial_confirm:{nonce}"})
+        async with database[1]() as session, session.begin():
+            changed = await session.get(Plan, plan.id)
+            changed.price = Decimal("991")
+        await confirm_plan_trial(confirmation, admin, catalog, state)
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        assert await state.get_state() == PlanEditStates.trial_confirm.state
+        async with database[1]() as session, session.begin():
+            changed = await session.get(Plan, plan.id)
+            changed.price = Decimal("990")
+        await confirm_plan_trial(confirmation, admin, catalog, state)
+        await confirm_plan_trial(confirmation, admin, catalog, state)
         assert await state.get_state() is None
         await select_trial_unit(unit_event, admin, state)
         assert await state.get_state() is None

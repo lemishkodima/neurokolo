@@ -279,7 +279,10 @@ No replay of historical purchases and no server-side CAPI delivery is performed.
 
 In Telegram, open `/admin` → tariffs → select a tariff → `🎁 Тріал`.
 Enter the trial price, choose Days / Weeks / Months using inline buttons,
-then enter the quantity. Only the final step saves the configuration.
+then enter the quantity. Review the price, duration, recurring amount and frequency;
+only Confirm saves the configuration. Back from the summary returns to quantity.
+If recurring terms change while the summary is open, confirmation is rejected;
+go Back and regenerate the summary before confirming again.
 Each step has Back: quantity → unit → price → tariff. Draft price is retained;
 old step buttons are rejected after navigating back.
 Cancel by returning to the admin menu; no partial changes are saved.

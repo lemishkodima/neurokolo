@@ -358,6 +358,7 @@ class CatalogService:
     async def configure_trial(
         self, plan_id: uuid.UUID, *, price: Decimal | None, months: int = 1,
         duration: int | None = None, unit: str = "months",
+        expected_terms: tuple[Decimal, str, int] | None = None,
     ) -> Plan | None:
         count = duration if duration is not None else months
         add_trial_period(utc_now(), count, unit)
@@ -370,6 +371,12 @@ class CatalogService:
             plan = await session.get(Plan, plan_id, with_for_update=True)
             if plan is None or not plan.is_active:
                 return None
+            if expected_terms is not None and expected_terms != (
+                plan.price, plan.currency, plan.billing_months,
+            ):
+                raise ValueError(
+                    "Умови тарифу змінилися. Поверніться назад і перегляньте підсумок.",
+                )
             if price is not None and price >= plan.price:
                 raise ValueError("Тріальна ціна має бути меншою за звичайну.")
             plan.trial_price = price

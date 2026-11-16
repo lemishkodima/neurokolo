@@ -14,6 +14,7 @@ class PlanEditStates(StatesGroup):
     trial = State()
     trial_unit = State()
     trial_quantity = State()
+    trial_confirm = State()
 
 
 class AdminAddStates(StatesGroup):
