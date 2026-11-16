@@ -1,8 +1,9 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -105,9 +106,9 @@ async def test_trial_initial_and_regular_amounts_are_snapshotted(
     assert checkout.gateway_fields["amount"] == "10.00"
     assert checkout.gateway_fields["regularAmount"] == "990.00"
     assert checkout.gateway_fields["regularMode"] == "quarterly"
-    assert checkout.gateway_fields["dateNext"] == add_trial_period(utc_now(), count, unit).strftime(
-        "%d.%m.%Y"
-    )
+    assert checkout.gateway_fields["dateNext"] == add_trial_period(
+        utc_now(), count, unit,
+    ).astimezone(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y")
     async with factory() as session, session.begin():
         plan = await session.scalar(select(Plan))
         plan.price, plan.trial_price, plan.billing_months = 1500, 20, 12
@@ -168,6 +169,19 @@ async def test_legacy_checkout_keeps_months_after_plan_change(database: Any, ser
     assert as_utc(sub.current_period_end) == (
         as_utc(sub.current_period_start) + relativedelta(months=1)
     )
+
+
+async def test_one_day_trial_after_kyiv_midnight(database: Any, services: Any) -> None:
+    service = await prepare(database, services)
+    async with database[1]() as session, session.begin():
+        plan = await session.scalar(select(Plan))
+        plan.trial_duration, plan.trial_unit = 1, "days"
+    with patch("club_bot.services.subscriptions.utc_now",
+               return_value=datetime(2026, 11, 16, 23, 30, tzinfo=UTC)):
+        checkout = await service.create_checkout(
+            plan_code="trial", email=None, phone=None, referral_code=None, return_url=None,
+        )
+    assert checkout.gateway_fields["dateNext"] == "18.11.2026"
 
 
 async def test_anonymous_renewal_before_claim_is_applied_once(database: Any, services: Any) -> None:

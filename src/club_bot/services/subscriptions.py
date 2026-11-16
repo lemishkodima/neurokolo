@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -221,7 +222,7 @@ class SubscriptionService:
                 ),
                 service_url=self.service_url,
                 return_url=return_url or self.default_return_url,
-                date_next=next_payment_at,
+                date_next=next_payment_at.astimezone(ZoneInfo("Europe/Kyiv")),
                 regular_count=self.regular_count,
                 regular_mode=wayforpay_regular_mode(plan.billing_months),
                 email=email,
