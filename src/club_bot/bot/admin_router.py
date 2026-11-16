@@ -423,7 +423,9 @@ async def trial_back(
     expected = {"plan": PlanEditStates.trial.state,
                 "price": PlanEditStates.trial_unit.state,
                 "unit": PlanEditStates.trial_quantity.state,
-                "quantity": PlanEditStates.trial_confirm.state}
+                "quantity": PlanEditStates.trial_confirm.state,
+                "edit_price": PlanEditStates.trial_confirm.state,
+                "edit_duration": PlanEditStates.trial_confirm.state}
     if (len(parts) != 4 or parts[2] != data.get("trial_nonce")
             or parts[3] not in expected or await state.get_state() != expected[parts[3]]):
         await callback.answer("Ця кнопка вже неактуальна.")
@@ -435,14 +437,14 @@ async def trial_back(
         return
     target = parts[3]
     nonce = uuid.uuid4().hex[:8]
-    await state.update_data(trial_nonce=nonce)
+    await state.update_data(trial_nonce=nonce, trial_price_only=target == "edit_price")
     if target == "plan":
         await state.clear()
         text = _plan_details(plan)
         keyboard = plan_actions_keyboard(
             plan, can_archive=plan.code != catalog_service.default_plan_code,
         )
-    elif target == "price":
+    elif target in {"price", "edit_price"}:
         await state.set_state(PlanEditStates.trial)
         text = (f"Крок 1 із 4. Введена ціна: {escape(data['trial_price'])} {plan.currency}.\n"
                 f"Введіть нову ціну або повторіть попередню (менше {plan.price}).\n"
@@ -494,6 +496,12 @@ async def save_plan_trial(
         return
     nonce = uuid.uuid4().hex[:8]
     await state.update_data(trial_price=str(price), trial_nonce=nonce)
+    if data.get("trial_price_only"):
+        await state.update_data(trial_price_only=False)
+        await _show_trial_summary(
+            message, plan, state, price, data["trial_duration"], data["trial_unit"],
+        )
+        return
     await state.set_state(PlanEditStates.trial_unit)
     await message.answer(
         f"Крок 2 із 4. Ціна тріалу: {price} {plan.currency}. Оберіть одиницю часу:",
@@ -553,6 +561,12 @@ async def save_trial_quantity(
             "Тріальна ціна має бути меншою за звичайну. Змініть ціну через «Назад».",
         )
         return
+    await _show_trial_summary(message, plan, state, price, duration, unit)
+
+
+async def _show_trial_summary(
+    message: Message, plan: Plan, state: FSMContext, price: Decimal, duration: int, unit: str,
+) -> None:
     nonce = uuid.uuid4().hex[:8]
     await state.update_data(
         trial_duration=duration, trial_nonce=nonce,

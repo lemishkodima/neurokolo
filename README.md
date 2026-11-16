@@ -281,6 +281,8 @@ In Telegram, open `/admin` → tariffs → select a tariff → `🎁 Тріал`
 Enter the trial price, choose Days / Weeks / Months using inline buttons,
 then enter the quantity. Review the price, duration, recurring amount and frequency;
 only Confirm saves the configuration. Back from the summary returns to quantity.
+The summary also offers Edit price (preserves duration and returns to summary)
+and Edit duration (unit, then quantity; preserves price). Neither saves immediately.
 If recurring terms change while the summary is open, confirmation is rejected;
 go Back and regenerate the summary before confirming again.
 Each step has Back: quantity → unit → price → tariff. Draft price is retained;

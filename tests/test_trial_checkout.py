@@ -19,7 +19,7 @@ from test_subscription_flow import database as database
 from test_subscription_flow import services as services
 
 from club_bot.api import create_app
-from club_bot.bot.admin_keyboards import plan_actions_keyboard
+from club_bot.bot.admin_keyboards import plan_actions_keyboard, trial_confirm_keyboard
 from club_bot.bot.admin_router import (
     admin_home,
     confirm_plan_trial,
@@ -181,6 +181,62 @@ async def test_legacy_checkout_keeps_months_after_plan_change(database: Any, ser
     assert as_utc(sub.current_period_end) == (
         as_utc(sub.current_period_start) + relativedelta(months=1)
     )
+
+
+@pytest.mark.parametrize("target", ["edit_price", "edit_duration"])
+async def test_trial_summary_shortcuts(database: Any, services: Any, target: str) -> None:
+    await prepare(database, services)
+    catalog = CatalogService(database[1], default_plan_code="base")
+    plan = (await catalog.list_plans())[0]
+    state = FSMContext(MemoryStorage(), StorageKey(bot_id=1, chat_id=501, user_id=501))
+    await state.update_data(selected_plan_id=str(plan.id), trial_price="5", trial_unit="days",
+                            trial_duration=13, trial_nonce="summary",
+                            trial_terms=["990", "UAH", 3])
+    await state.set_state(PlanEditStates.trial_confirm)
+    message = Message(message_id=1, date=utc_now(), chat=Chat(id=501, type="private"),
+                      from_user=TelegramUser(id=501, is_bot=False, first_name="Admin"), text="7")
+    event = CallbackQuery(id="edit", from_user=message.from_user, chat_instance="test",
+                          message=message, data=f"adm:trial_back:summary:{target}")
+    actions = [b.callback_data for row in trial_confirm_keyboard("summary").inline_keyboard
+               for b in row]
+    assert event.data in actions
+    admin = SimpleNamespace(is_admin=AsyncMock(return_value=False))
+    with (patch.object(Message, "answer", new_callable=AsyncMock),
+          patch.object(Message, "edit_text", new_callable=AsyncMock),
+          patch.object(CallbackQuery, "answer", new_callable=AsyncMock)):
+        await trial_back(event, admin, catalog, state)
+        assert await state.get_state() == PlanEditStates.trial_confirm.state
+        admin.is_admin.return_value = True
+        await trial_back(event, admin, catalog, state)
+        before = await state.get_data()
+        await trial_back(event, admin, catalog, state)  # stale shortcut does nothing
+        assert await state.get_data() == before
+        if target == "edit_price":
+            assert await state.get_state() == PlanEditStates.trial.state
+            await save_plan_trial(message, admin, catalog, state)
+            expected_price, expected_duration, expected_unit = Decimal("7"), 13, "days"
+        else:
+            assert await state.get_state() == PlanEditStates.trial_unit.state
+            nonce = (await state.get_data())["trial_nonce"]
+            await select_trial_unit(
+                event.model_copy(update={"data": f"adm:trial_unit:{nonce}:weeks"}), admin, state,
+            )
+            await save_trial_quantity(message, admin, catalog, state)
+            expected_price, expected_duration, expected_unit = Decimal("5"), 7, "weeks"
+        assert await state.get_state() == PlanEditStates.trial_confirm.state
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        await confirm_plan_trial(
+            event.model_copy(update={"data": "adm:trial_confirm:summary"}), admin, catalog, state,
+        )
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        nonce = (await state.get_data())["trial_nonce"]
+        await confirm_plan_trial(
+            event.model_copy(update={"data": f"adm:trial_confirm:{nonce}"}), admin, catalog, state,
+        )
+        saved = await catalog.get_plan(plan.id)
+        assert (saved.trial_price, saved.trial_duration, saved.trial_unit) == (
+            expected_price, expected_duration, expected_unit,
+        )
 
 
 async def test_one_day_trial_after_kyiv_midnight(database: Any, services: Any) -> None:
