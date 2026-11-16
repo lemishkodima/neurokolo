@@ -20,6 +20,7 @@ from club_bot.bot.admin_router import payment_plan_link, save_plan_trial
 from club_bot.config import Settings
 from club_bot.domain.enums import CheckoutStatus, SubscriptionStatus
 from club_bot.domain.rules import as_utc, utc_now
+from club_bot.domain.trial import add_trial_period
 from club_bot.integrations.wayforpay import InvalidWayForPaySignature
 from club_bot.models import CheckoutSession, Plan, Subscription
 from club_bot.services.admin import CatalogService
@@ -78,14 +79,21 @@ async def prepare(database: Any, services: Any) -> Any:
 
 
 @pytest.mark.parametrize("owner", [None, 501])
+@pytest.mark.parametrize("count,unit", [(1, "days"), (19, "days"), (365, "days"),
+                                        (2, "weeks"), (5, "months"), (1, "months")])
 async def test_trial_initial_and_regular_amounts_are_snapshotted(
     database: Any,
     services: Any,
     owner: int | None,
+    count: int,
+    unit: str,
 ) -> None:
     service = await prepare(database, services)
     _, factory = database
     _, _, provider = services
+    async with factory() as session, session.begin():
+        plan = await session.scalar(select(Plan))
+        plan.trial_duration, plan.trial_unit = count, unit
     checkout = await service.create_checkout(
         plan_code="trial",
         email=None,
@@ -97,12 +105,13 @@ async def test_trial_initial_and_regular_amounts_are_snapshotted(
     assert checkout.gateway_fields["amount"] == "10.00"
     assert checkout.gateway_fields["regularAmount"] == "990.00"
     assert checkout.gateway_fields["regularMode"] == "quarterly"
-    assert checkout.gateway_fields["dateNext"] == (utc_now() + relativedelta(months=1)).strftime(
+    assert checkout.gateway_fields["dateNext"] == add_trial_period(utc_now(), count, unit).strftime(
         "%d.%m.%Y"
     )
     async with factory() as session, session.begin():
         plan = await session.scalar(select(Plan))
         plan.price, plan.trial_price, plan.billing_months = 1500, 20, 12
+        plan.trial_duration, plan.trial_unit = 77, "days"
     wrong = callback(provider, checkout.order_reference, "990.00")
     await service.process_callback(wrong)
     assert await service.checkout_status_by_token(checkout.checkout_token) == CheckoutStatus.CREATED
@@ -113,7 +122,7 @@ async def test_trial_initial_and_regular_amounts_are_snapshotted(
     assert sub.billing_amount == Decimal("990.00")
     assert sub.billing_months == 3
     first_end = as_utc(sub.current_period_end)
-    assert first_end == as_utc(sub.current_period_start) + relativedelta(months=1)
+    assert first_end == add_trial_period(as_utc(sub.current_period_start), count, unit)
     assert not await service.process_callback(initial)
     renewal = callback(provider, checkout.order_reference + "_WFPREG-001", "10.00")
     await service.process_callback(renewal)
@@ -139,6 +148,26 @@ async def test_trial_initial_and_regular_amounts_are_snapshotted(
     )
     assert next_checkout.gateway_fields["amount"] == "1500.00"
     assert next_checkout.gateway_fields["regularAmount"] == "1500.00"
+
+
+async def test_legacy_checkout_keeps_months_after_plan_change(database: Any, services: Any) -> None:
+    service = await prepare(database, services)
+    _, factory = database
+    _, _, provider = services
+    checkout = await service.create_checkout(
+        plan_code="trial", email=None, phone=None, referral_code=None, return_url=None,
+    )
+    async with factory() as session, session.begin():
+        row = await session.scalar(select(CheckoutSession))
+        row.initial_duration, row.initial_unit = None, None
+        plan = await session.scalar(select(Plan))
+        plan.trial_duration, plan.trial_unit = 1, "days"
+    await service.process_callback(callback(provider, checkout.order_reference, "10.00"))
+    result = await service.claim_checkout(checkout.checkout_token, 501)
+    sub = result.subscription
+    assert as_utc(sub.current_period_end) == (
+        as_utc(sub.current_period_start) + relativedelta(months=1)
+    )
 
 
 async def test_anonymous_renewal_before_claim_is_applied_once(database: Any, services: Any) -> None:
@@ -307,7 +336,12 @@ async def test_admin_trial_validation_disable_and_archive(database: Any, service
     assert await catalog.configure_trial(plan.id, price=Decimal("1")) is None
 
 
-async def test_admin_trial_and_external_link_controls(database: Any, services: Any) -> None:
+@pytest.mark.parametrize("text,count,unit", [("5 2", 2, "months"),
+                                           ("5 13 днів", 13, "days"),
+                                           ("5 2 тижні", 2, "weeks")])
+async def test_admin_trial_and_external_link_controls(
+    database: Any, services: Any, text: str, count: int, unit: str,
+) -> None:
     await prepare(database, services)
     catalog = CatalogService(database[1], default_plan_code="base")
     plan = (await catalog.list_plans())[0]
@@ -320,7 +354,7 @@ async def test_admin_trial_and_external_link_controls(database: Any, services: A
         date=utc_now(),
         chat=Chat(id=501, type="private"),
         from_user=TelegramUser(id=501, is_bot=False, first_name="Admin"),
-        text="5 2",
+        text=text,
     )
     admin = SimpleNamespace(is_admin=AsyncMock(return_value=True))
     state = SimpleNamespace(
@@ -344,6 +378,8 @@ async def test_admin_trial_and_external_link_controls(database: Any, services: A
     ):
         await save_plan_trial(message, admin, catalog, state)
         assert (await catalog.get_plan(plan.id)).trial_price == Decimal("5")
+        assert (await catalog.get_plan(plan.id)).trial_duration == count
+        assert (await catalog.get_plan(plan.id)).trial_unit == unit
         await payment_plan_link(
             event,
             admin,

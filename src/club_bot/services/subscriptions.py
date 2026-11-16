@@ -25,6 +25,7 @@ from club_bot.domain.payments import (
     canonical_wayforpay_order_reference,
 )
 from club_bot.domain.rules import as_utc, generate_public_token, utc_now
+from club_bot.domain.trial import add_trial_period, trial_label
 from club_bot.integrations.wayforpay import WayForPayClient
 from club_bot.models import AppSetting, CheckoutSession, Payment, Referral, Subscription, User
 from club_bot.repositories import (
@@ -169,6 +170,9 @@ class SubscriptionService:
             first_amount = plan.trial_price if use_trial else plan.price
             assert first_amount is not None
             initial_months = plan.trial_months if use_trial else plan.billing_months
+            initial_duration = (plan.trial_duration or plan.trial_months
+                                if use_trial else plan.billing_months)
+            initial_unit = (plan.trial_unit or "months") if use_trial else "months"
             token = generate_public_token()
             prefix = "TEST" if test_mode else "CLUB"
             order_reference = f"{prefix}-{now:%Y%m%d}-{token[:12]}"
@@ -183,6 +187,8 @@ class SubscriptionService:
                 amount=first_amount,
                 recurring_amount=plan.price,
                 initial_months=initial_months,
+                initial_duration=initial_duration,
+                initial_unit=initial_unit,
                 currency=plan.currency,
                 billing_months=plan.billing_months,
                 expires_at=now + timedelta(hours=24),
@@ -191,7 +197,7 @@ class SubscriptionService:
             if user is not None:
                 await self._attach_referrer_from_checkout(session, user, referral_code)
 
-            next_payment_at = add_billing_months(now, initial_months)
+            next_payment_at = add_trial_period(now, initial_duration, initial_unit)
             period_label = (
                 f"{plan.billing_months} місяць"
                 if plan.billing_months == 1
@@ -205,7 +211,8 @@ class SubscriptionService:
                 currency=plan.currency,
                 product_name=(
                     f"{'[TEST] ' if test_mode else ''}{plan.name} — "
-                    f"перші {initial_months} міс.: {first_amount} {plan.currency}; "
+                    f"перші {trial_label(initial_duration, initial_unit)}: "
+                    f"{first_amount} {plan.currency}; "
                     f"далі {plan.price} {plan.currency} кожні {plan.billing_months} міс."
                     if use_trial else
                     f"[TEST] {plan.name} — підписка на {period_label}, автопродовження"
@@ -1082,8 +1089,10 @@ class SubscriptionService:
             plan_id=checkout.plan_id,
             status=SubscriptionStatus.ACTIVE,
             current_period_start=now,
-            current_period_end=add_billing_months(
-                now, checkout.initial_months or checkout.billing_months,
+            current_period_end=add_trial_period(
+                now,
+                checkout.initial_duration or checkout.initial_months or checkout.billing_months,
+                checkout.initial_unit or "months",
             ),
             billing_amount=(checkout.recurring_amount
                             if checkout.recurring_amount is not None else checkout.amount),

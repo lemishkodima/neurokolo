@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from club_bot.domain.billing import validate_billing_months
 from club_bot.domain.enums import ResourceType
 from club_bot.domain.rules import as_utc, utc_now
+from club_bot.domain.trial import add_trial_period
 from club_bot.models import Admin, AppSetting, Plan, TelegramResource, plan_resources
 from club_bot.services.telegram_content import TelegramContent
 
@@ -356,8 +357,10 @@ class CatalogService:
 
     async def configure_trial(
         self, plan_id: uuid.UUID, *, price: Decimal | None, months: int = 1,
+        duration: int | None = None, unit: str = "months",
     ) -> Plan | None:
-        validate_billing_months(months)
+        count = duration if duration is not None else months
+        add_trial_period(utc_now(), count, unit)
         if price is not None and (
             not price.is_finite() or price <= 0 or price >= Decimal("10000000000")
             or price != price.quantize(Decimal("0.01"))
@@ -370,7 +373,9 @@ class CatalogService:
             if price is not None and price >= plan.price:
                 raise ValueError("Тріальна ціна має бути меншою за звичайну.")
             plan.trial_price = price
-            plan.trial_months = months
+            plan.trial_months = count if unit == "months" else 1
+            plan.trial_duration = count
+            plan.trial_unit = unit
             await session.flush()
             return plan
 

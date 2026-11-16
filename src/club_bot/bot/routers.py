@@ -19,6 +19,7 @@ from club_bot.bot.keyboards import (
 )
 from club_bot.config import Settings
 from club_bot.domain.billing import billing_period_label
+from club_bot.domain.trial import trial_label
 from club_bot.integrations.wayforpay import WayForPayError
 from club_bot.services.access import AccessDeniedError, AccessRecoveryError, AccessService
 from club_bot.services.admin import CatalogService, SettingsService
@@ -360,8 +361,12 @@ async def _offer_checkout(
             f"{billing_period_label(plan.billing_months)}"
         )
         if plan.trial_price is not None and plan.trial_price < plan.price:
+            period = trial_label(
+                plan.trial_duration or plan.trial_months, plan.trial_unit or "months",
+            )
             trial_descriptions.append(
-                f"🎁 {escape(plan.name)}: перші {plan.trial_months} міс. — "
+                f"🎁 {escape(plan.name)}: перші "
+                f"{period} — "
                 f"{plan.trial_price} {plan.currency}; далі {plan.price} {plan.currency} "
                 f"кожні {plan.billing_months} міс."
             )

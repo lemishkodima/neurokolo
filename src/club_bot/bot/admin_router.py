@@ -52,6 +52,7 @@ from club_bot.domain.billing import (
     validate_billing_months,
 )
 from club_bot.domain.enums import BroadcastTarget
+from club_bot.domain.trial import parse_trial, trial_label
 from club_bot.models import LandingTemplate, Plan
 from club_bot.services.admin import (
     AdminService,
@@ -104,7 +105,8 @@ async def _authorized(event: Message | CallbackQuery, admin_service: AdminServic
 def _plan_details(plan: Plan) -> str:
     trial = (
         f"Тріал: <b>{plan.trial_price} {plan.currency}</b> за "
-        f"{billing_period_label(plan.trial_months)}; далі звичайна ціна.\n"
+        f"{trial_label(plan.trial_duration or plan.trial_months, plan.trial_unit or 'months')}; "
+        "далі звичайна ціна.\n"
         if plan.trial_price is not None else "Тріал: вимкнено.\n"
     )
     return (
@@ -395,9 +397,11 @@ async def edit_plan_trial(
     await state.set_state(PlanEditStates.trial)
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            "Введіть першу ціну та кількість місяців через пробіл, наприклад: <code>10 1</code>.\n"
+            "Введіть: ціна кількість одиниця. Приклади:\n"
+            "<code>1 7 днів</code> · <code>10 2 тижні</code> · <code>10 1 місяць</code>\n"
             f"Далі: {plan.price} {plan.currency} кожні {plan.billing_months} міс.\n"
-            "Тривалість: 1, 2, 3, 6 або 12 місяців. Ціна більша за нуль і менша за звичайну.\n"
+            "Кількість — довільне ціле число від 1. Тиждень = 7 днів. "
+            "Без одиниці — місяці. Ціна більша за нуль і менша за звичайну.\n"
             "Для вимкнення надішліть <code>вимкнути</code>. Зміни стосуються лише нових оплат.",
         )
     await callback.answer()
@@ -412,16 +416,15 @@ async def save_plan_trial(
         return
     data = await state.get_data()
     try:
-        if message.text.strip().casefold() in {"вимкнути", "off"}:
-            price, months = None, 1
-        else:
-            amount, period = message.text.replace(",", ".").split()
-            price, months = Decimal(amount), int(period)
+        price, duration, unit = parse_trial(message.text)
         plan = await catalog_service.configure_trial(
-            uuid.UUID(str(data["selected_plan_id"])), price=price, months=months,
+            uuid.UUID(str(data["selected_plan_id"])), price=price, duration=duration, unit=unit,
         )
     except (ValueError, InvalidOperation):
-        await message.answer("Некоректні дані. Приклад: 10 1. Ціна має бути меншою за звичайну.")
+        await message.answer(
+            "Некоректні дані. Приклад: 1 7 днів / 10 2 тижні / 10 1 місяць. "
+            "Кількість — ціле число від 1; ціна додатна та менша за звичайну.",
+        )
         return
     await state.clear()
     if plan is None:
