@@ -33,6 +33,7 @@ from club_bot.bot.admin_keyboards import (
     plan_resources_keyboard,
     plans_keyboard,
     settings_keyboard,
+    trial_units_keyboard,
 )
 from club_bot.bot.admin_states import (
     AdminAddStates,
@@ -52,7 +53,7 @@ from club_bot.domain.billing import (
     validate_billing_months,
 )
 from club_bot.domain.enums import BroadcastTarget
-from club_bot.domain.trial import parse_trial, trial_label
+from club_bot.domain.trial import trial_label
 from club_bot.models import LandingTemplate, Plan
 from club_bot.services.admin import (
     AdminService,
@@ -397,12 +398,11 @@ async def edit_plan_trial(
     await state.set_state(PlanEditStates.trial)
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            "Введіть: ціна кількість одиниця. Приклади:\n"
-            "<code>1 7 днів</code> · <code>10 2 тижні</code> · <code>10 1 місяць</code>\n"
+            f"Крок 1 із 3. Введіть ціну тріалу в {plan.currency}, наприклад: <code>5</code>.\n"
             f"Далі: {plan.price} {plan.currency} кожні {plan.billing_months} міс.\n"
-            "Кількість — довільне ціле число від 1. Тиждень = 7 днів. "
-            "Без одиниці — місяці. Ціна більша за нуль і менша за звичайну.\n"
+            "Ціна більша за нуль і менша за звичайну.\n"
             "Для вимкнення надішліть <code>вимкнути</code>. Зміни стосуються лише нових оплат.",
+            reply_markup=back_to_admin(),
         )
     await callback.answer()
 
@@ -415,15 +415,76 @@ async def save_plan_trial(
     if not await _authorized(message, admin_service) or not message.text:
         return
     data = await state.get_data()
+    plan = await catalog_service.get_plan(uuid.UUID(str(data["selected_plan_id"])))
+    if plan is None or not plan.is_active:
+        await state.clear()
+        await message.answer("Тариф недоступний.")
+        return
+    if message.text.strip().casefold() in {"вимкнути", "off"}:
+        await catalog_service.configure_trial(plan.id, price=None)
+        await state.clear()
+        await message.answer("Тріал вимкнено для нових оплат.", reply_markup=back_to_admin())
+        return
     try:
-        price, duration, unit = parse_trial(message.text)
+        price = Decimal(message.text.strip().replace(",", "."))
+        if (not price.is_finite() or price <= 0 or price >= plan.price
+                or price != price.quantize(Decimal("0.01"))):
+            raise ValueError
+    except (ValueError, InvalidOperation):
+        await message.answer(
+            "Введіть лише ціну: додатне число менше звичайної ціни, до 2 знаків після коми.",
+        )
+        return
+    nonce = uuid.uuid4().hex[:8]
+    await state.update_data(trial_price=str(price), trial_nonce=nonce)
+    await state.set_state(PlanEditStates.trial_unit)
+    await message.answer(
+        f"Крок 2 із 3. Ціна тріалу: {price} {plan.currency}. Оберіть одиницю часу:",
+        reply_markup=trial_units_keyboard(nonce),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("adm:trial_unit:"))
+async def select_trial_unit(
+    callback: CallbackQuery, admin_service: AdminService, state: FSMContext,
+) -> None:
+    if not await _authorized(callback, admin_service) or callback.data is None:
+        return
+    data = await state.get_data()
+    _, _, nonce, unit = callback.data.split(":")
+    if (await state.get_state() != PlanEditStates.trial_unit.state
+            or nonce != data.get("trial_nonce") or unit not in {"days", "weeks", "months"}):
+        await callback.answer("Цей крок уже неактуальний. Відкрийте налаштування тріалу знову.")
+        return
+    await state.update_data(trial_unit=unit)
+    await state.set_state(PlanEditStates.trial_quantity)
+    label = {"days": "днів", "weeks": "тижнів", "months": "місяців"}[unit]
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            f"Крок 3 із 3. Введіть кількість {label}: будь-яке ціле число від 1.\n"
+            "Після введення налаштування буде збережено.", reply_markup=back_to_admin(),
+        )
+    await callback.answer()
+
+
+@admin_router.message(PlanEditStates.trial_quantity)
+async def save_trial_quantity(
+    message: Message, admin_service: AdminService, catalog_service: CatalogService,
+    state: FSMContext,
+) -> None:
+    if not await _authorized(message, admin_service) or not message.text:
+        return
+    data = await state.get_data()
+    try:
+        duration = int(message.text.strip())
+        price, unit = Decimal(data["trial_price"]), data["trial_unit"]
         plan = await catalog_service.configure_trial(
             uuid.UUID(str(data["selected_plan_id"])), price=price, duration=duration, unit=unit,
         )
-    except (ValueError, InvalidOperation):
+    except (ValueError, InvalidOperation) as error:
         await message.answer(
-            "Некоректні дані. Приклад: 1 7 днів / 10 2 тижні / 10 1 місяць. "
-            "Кількість — ціле число від 1; ціна додатна та менша за звичайну.",
+            "Не вдалося зберегти. Кількість має бути цілим числом від 1. "
+            f"{escape(str(error))}",
         )
         return
     await state.clear()
@@ -431,7 +492,8 @@ async def save_plan_trial(
         await message.answer("Тариф недоступний.")
         return
     await message.answer(
-        "✅ Налаштування тріалу збережено. Чинні підписки не змінено.",
+        f"✅ Тріал: {plan.trial_price} {plan.currency} за {trial_label(duration, unit)}.\n"
+        "Налаштування збережено. Чинні підписки не змінено.",
         reply_markup=plan_actions_keyboard(
             plan, can_archive=plan.code != catalog_service.default_plan_code,
         ),

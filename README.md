@@ -278,11 +278,12 @@ No replay of historical purchases and no server-side CAPI delivery is performed.
 ### Discounted first period and public links
 
 In Telegram, open `/admin` → tariffs → select a tariff → `🎁 Тріал`.
-Send `10 1` to charge 10 in the tariff currency for the first month. The tariff's
-normal price and billing period apply afterwards (for example, 990 UAH every month).
-Use `1 7 днів`, `10 2 тижні`, or `10 1 місяць` for days, weeks, or calendar months.
+Enter the trial price, choose Days / Weeks / Months using inline buttons,
+then enter the quantity. Only the final step saves the configuration.
+Cancel by returning to the admin menu; no partial changes are saved.
+The tariff's normal price and billing period apply afterwards.
 Any positive integer count is accepted (within representable calendar dates), not a preset list.
-One week equals seven days. The legacy two-number format still means months.
+One week equals seven days.
 The first amount must be positive,
 have at most two decimal places and be lower than the normal price; zero/free trials
 are not implemented. Send `вимкнути` to disable the offer for new checkouts.

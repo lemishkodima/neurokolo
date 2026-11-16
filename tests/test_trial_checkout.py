@@ -7,6 +7,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Chat, Message
 from aiogram.types import User as TelegramUser
 from dateutil.relativedelta import relativedelta
@@ -17,7 +20,14 @@ from test_subscription_flow import services as services
 
 from club_bot.api import create_app
 from club_bot.bot.admin_keyboards import plan_actions_keyboard
-from club_bot.bot.admin_router import payment_plan_link, save_plan_trial
+from club_bot.bot.admin_router import (
+    admin_home,
+    payment_plan_link,
+    save_plan_trial,
+    save_trial_quantity,
+    select_trial_unit,
+)
+from club_bot.bot.admin_states import PlanEditStates
 from club_bot.config import Settings
 from club_bot.domain.enums import CheckoutStatus, SubscriptionStatus
 from club_bot.domain.rules import as_utc, utc_now
@@ -371,10 +381,9 @@ async def test_admin_trial_and_external_link_controls(
         text=text,
     )
     admin = SimpleNamespace(is_admin=AsyncMock(return_value=True))
-    state = SimpleNamespace(
-        get_data=AsyncMock(return_value={"selected_plan_id": str(plan.id)}),
-        clear=AsyncMock(),
-    )
+    state = FSMContext(MemoryStorage(), StorageKey(bot_id=1, chat_id=501, user_id=501))
+    await state.update_data(selected_plan_id=str(plan.id))
+    await state.set_state(PlanEditStates.trial)
     event = CallbackQuery(
         id="event",
         from_user=message.from_user,
@@ -384,16 +393,50 @@ async def test_admin_trial_and_external_link_controls(
     )
     with (
         patch.object(Message, "answer", new_callable=AsyncMock) as answer,
+        patch.object(Message, "edit_text", new_callable=AsyncMock),
         patch.object(
             CallbackQuery,
             "answer",
             new_callable=AsyncMock,
         ),
     ):
-        await save_plan_trial(message, admin, catalog, state)
+        for invalid in ("0", "-1", "NaN", "Infinity", "990", "1.001", "5 2"):
+            await save_plan_trial(
+                message.model_copy(update={"text": invalid}), admin, catalog, state,
+            )
+            assert await state.get_state() == PlanEditStates.trial.state
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        await save_plan_trial(message.model_copy(update={"text": "5"}), admin, catalog, state)
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        nonce = (await state.get_data())["trial_nonce"]
+        unit_event = event.model_copy(update={"data": f"adm:trial_unit:{nonce}:{unit}"})
+        await select_trial_unit(
+            unit_event.model_copy(update={"data": f"adm:trial_unit:old:{unit}"}), admin, state,
+        )
+        assert await state.get_state() == PlanEditStates.trial_unit.state
+        admin.is_admin.return_value = False
+        await select_trial_unit(unit_event, admin, state)
+        assert await state.get_state() == PlanEditStates.trial_unit.state
+        admin.is_admin.return_value = True
+        await select_trial_unit(unit_event, admin, state)
+        assert await state.get_state() == PlanEditStates.trial_quantity.state
+        await save_trial_quantity(message.model_copy(update={"text": "0"}), admin, catalog, state)
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("10")
+        await save_trial_quantity(
+            message.model_copy(update={"text": str(count)}), admin, catalog, state,
+        )
+        assert await state.get_state() is None
+        await select_trial_unit(unit_event, admin, state)
+        assert await state.get_state() is None
         assert (await catalog.get_plan(plan.id)).trial_price == Decimal("5")
         assert (await catalog.get_plan(plan.id)).trial_duration == count
         assert (await catalog.get_plan(plan.id)).trial_unit == unit
+        await state.update_data(selected_plan_id=str(plan.id))
+        await state.set_state(PlanEditStates.trial)
+        await save_plan_trial(message.model_copy(update={"text": "7"}), admin, catalog, state)
+        await admin_home(event, admin, state)
+        assert await state.get_state() is None
+        assert (await catalog.get_plan(plan.id)).trial_price == Decimal("5")
         await payment_plan_link(
             event,
             admin,

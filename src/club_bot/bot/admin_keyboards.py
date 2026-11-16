@@ -43,6 +43,14 @@ def back_to_admin() -> InlineKeyboardMarkup:
     )
 
 
+def trial_units_keyboard(nonce: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"adm:trial_unit:{nonce}:{unit}")
+         for label, unit in (("Дні", "days"), ("Тижні", "weeks"), ("Місяці", "months"))],
+        [InlineKeyboardButton(text="Скасувати", callback_data="adm:home")],
+    ])
+
+
 def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     rows = [
         [
