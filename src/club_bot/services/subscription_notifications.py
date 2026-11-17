@@ -61,6 +61,7 @@ class SubscriptionNotificationService:
         grace_period_hours: int = 24,
         reminder_hours_before: int = 2,
         failed_payment_admin_alerts_enabled: bool = True,
+        recurring_rule_admin_alerts_enabled: bool = False,
     ) -> None:
         self.bot = bot
         self.access_service = access_service
@@ -70,6 +71,7 @@ class SubscriptionNotificationService:
         self.grace_period_hours = grace_period_hours
         self.reminder_hours_before = reminder_hours_before
         self.failed_payment_admin_alerts_enabled = failed_payment_admin_alerts_enabled
+        self.recurring_rule_admin_alerts_enabled = recurring_rule_admin_alerts_enabled
 
     async def send_activated(self, telegram_id: int) -> bool:
         try:
@@ -208,7 +210,11 @@ class SubscriptionNotificationService:
         order_reference: str,
         recurring_status: str,
     ) -> bool:
-        if self.session_factory is None or self.admin_service is None:
+        if (
+            not self.recurring_rule_admin_alerts_enabled
+            or self.session_factory is None
+            or self.admin_service is None
+        ):
             return False
         async with self.session_factory() as session, session.begin():
             subscription = await session.scalar(

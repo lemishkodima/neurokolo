@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from club_bot.db import create_engine, create_session_factory
@@ -205,6 +206,17 @@ async def test_missing_recurring_rule_sends_one_critical_admin_alert(
         AdminService(session_factory, [900]),
     )
 
+    # Muted by default: neither send nor mark the alert as delivered or change entitlement.
+    assert await service.send_recurring_rule_alert("CLUB-MISSING-RULE", "missing") is False
+    assert bot.messages == []
+    async with session_factory() as session:
+        stored = await session.scalar(select(Subscription))
+        assert stored is not None
+        assert stored.provider_recurring_alerted_at is None
+        assert stored.provider_recurring_status == "missing"
+        assert stored.status == SubscriptionStatus.ACTIVE
+
+    service.recurring_rule_admin_alerts_enabled = True
     assert await service.send_recurring_rule_alert("CLUB-MISSING-RULE", "missing") is True
     assert await service.send_recurring_rule_alert("CLUB-MISSING-RULE", "missing") is False
     assert len(bot.messages) == 1

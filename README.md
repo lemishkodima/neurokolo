@@ -388,8 +388,9 @@ An `Approved` callback grants only the paid entitlement. Immediately afterward t
 WayForPay `regularApi STATUS`; the bot reports auto-renewal as enabled only for the provider
 state `Active`. `Created`, `Confirmed`, `Suspended`, `Removed`, `Completed`, a failed STATUS
 request, or `4102 / Rule is not found` all keep auto-renewal disabled without shortening the
-already-paid period. A missing/non-active rule sends a one-time critical Telegram alert to
-administrators, is rechecked by the worker, and is exposed through the
+already-paid period. Telegram alerts for a missing/non-active rule are disabled by default
+(`RECURRING_RULE_ADMIN_ALERTS_ENABLED=false`). The rule is still rechecked by the worker
+and exposed through the
 `neurokolo_unverified_active_recurring_subscriptions` Prometheus metric.
 
 Cancellation treats WayForPay `4102 / Rule is not found` as an idempotent success:
